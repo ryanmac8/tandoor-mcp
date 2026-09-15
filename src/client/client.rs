@@ -285,62 +285,6 @@ impl TandoorClient {
         Ok(recipe)
     }
 
-    pub async fn import_recipe_from_url(&self, url: &str) -> Result<Recipe> {
-        let auth_header = self.get_auth_header()?;
-        let import_url = format!("{}/api/recipe-from-source/", self.base_url);
-        let request = RecipeImport {
-            url: url.to_string(),
-        };
-
-        tracing::info!("Importing recipe from URL: {}", url);
-
-        let response = self
-            .client
-            .post(&import_url)
-            .header("Authorization", auth_header)
-            .json(&request)
-            .send()
-            .await
-            .map_err(|e| {
-                tracing::error!("Network error importing recipe from {}: {}", url, e);
-                anyhow::anyhow!("Failed to connect to Tandoor API: {}", e)
-            })?;
-
-        let status = response.status();
-        tracing::trace!("Import recipe response status: {}", status);
-
-        if !status.is_success() {
-            let error_body = response
-                .text()
-                .await
-                .unwrap_or_else(|_| "Unable to read error response".to_string());
-            tracing::error!(
-                "Failed to import recipe from {} with status {}: {}",
-                url,
-                status,
-                error_body
-            );
-
-            match status.as_u16() {
-                400 => anyhow::bail!("Invalid URL or unsupported recipe site: {}", url),
-                404 => anyhow::bail!("Recipe import endpoint not available"),
-                _ => anyhow::bail!("Failed to import recipe: {} - {}", status, error_body),
-            }
-        }
-
-        let recipe: Recipe = response.json().await.map_err(|e| {
-            tracing::error!("Failed to parse import recipe response: {}", e);
-            anyhow::anyhow!("Invalid response format: {}", e)
-        })?;
-
-        tracing::info!(
-            "Successfully imported recipe '{}' with ID: {}",
-            recipe.name,
-            recipe.id
-        );
-        Ok(recipe)
-    }
-
     // Food operations
     pub async fn search_foods(
         &self,

@@ -95,7 +95,7 @@ jobs:
               docker logs tandoor 2>&1 || true
               exit 1
             fi
-            if curl -sf http://localhost:8080/api/ >/dev/null 2>&1; then
+            if curl -s --max-time 3 http://localhost:8080/api/ -o /dev/null; then
               echo "Tandoor is ready"
               exit 0
             fi

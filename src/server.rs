@@ -746,6 +746,51 @@ impl TandoorMcpServer {
         }
     }
 
+    #[tool(
+        description = "Import a recipe from a URL. Tandoor will scrape and parse the page. Returns the imported recipe or an error message if the site is not supported."
+    )]
+    async fn import_recipe_from_url(
+        &self,
+        Parameters(params): Parameters<ImportRecipeParams>,
+    ) -> Result<CallToolResult, McpError> {
+        let client = match self.ensure_authenticated().await {
+            Ok(c) => c,
+            Err(e) => {
+                return Ok(CallToolResult::error(vec![Content::text(
+                    json!({"error": "Authentication Error", "details": e.to_string()})
+                        .to_string(),
+                )]));
+            }
+        };
+
+        match client.import_recipe_from_url(&params.url).await {
+            Ok(result) => {
+                if result.error {
+                    Ok(CallToolResult::error(vec![Content::text(
+                        json!({
+                            "error": "Import failed",
+                            "message": result.msg,
+                            "duplicates": result.duplicates,
+                        })
+                        .to_string(),
+                    )]))
+                } else {
+                    Ok(CallToolResult::success(vec![Content::text(
+                        json!({
+                            "message": result.msg,
+                            "recipe_id": result.recipe_id,
+                            "recipe": result.recipe,
+                        })
+                        .to_string(),
+                    )]))
+                }
+            }
+            Err(e) => Ok(CallToolResult::error(vec![Content::text(
+                json!({"error": "Failed to import recipe", "details": e.to_string()}).to_string(),
+            )])),
+        }
+    }
+
     // Shopping list tools
     #[tool(description = "Add items to shopping list with intelligent consolidation")]
     async fn add_to_shopping_list(
@@ -2508,7 +2553,21 @@ impl ServerHandler for TandoorMcpServer {
                 .enable_tools()
                 .build(),
             server_info: Implementation::from_build_env(),
-            instructions: Some("This server provides comprehensive tools for managing recipes, shopping lists, meal plans, and food inventory through the Tandoor recipe management system. Available tools include: recipe search and management, shopping list operations, meal planning, inventory tracking, cooking history, and recipe suggestions based on available ingredients.".to_string()),
+            instructions: Some(
+                "Tandoor recipe management MCP server. \
+                READ-ONLY tools (safe to call freely): search_recipes, get_recipe_details, \
+                get_shopping_list, search_foods, get_keywords, get_units, get_meal_plans, \
+                get_meal_types, get_cook_log, suggest_from_inventory, get_recipe_books, \
+                get_recipe_book_entries, get_supermarkets, get_unit_conversions. \
+                WRITE tools (modify data — confirm intent before calling): create_recipe, \
+                import_recipe_from_url, update_recipe, add_to_shopping_list, \
+                check_shopping_items, clear_shopping_list, update_pantry, create_meal_plan, \
+                log_cooked_recipe, create_recipe_book, add_to_recipe_book, \
+                add_meal_plan_to_shopping_list. \
+                DESTRUCTIVE tools (permanent delete — always confirm with user first): \
+                delete_recipe, delete_meal_plan, delete_recipe_book, remove_from_recipe_book."
+                    .to_string(),
+            ),
         }
     }
 

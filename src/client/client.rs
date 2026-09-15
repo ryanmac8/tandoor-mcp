@@ -935,6 +935,29 @@ impl TandoorClient {
         Ok(units)
     }
 
+    pub async fn import_recipe_from_url(
+        &self,
+        url: &str,
+    ) -> Result<RecipeFromSourceResponse> {
+        let auth_header = self.get_auth_header()?;
+        let api_url = format!("{}/api/recipe-from-source/", self.base_url);
+
+        let body = serde_json::json!({ "url": url });
+        let response = self
+            .client
+            .post(&api_url)
+            .header("Authorization", auth_header)
+            .json(&body)
+            .send()
+            .await
+            .map_err(|e| anyhow::anyhow!("Failed to connect to Tandoor API: {}", e))?;
+
+        let result: RecipeFromSourceResponse = response.json().await.map_err(|e| {
+            anyhow::anyhow!("Invalid response from recipe import endpoint: {}", e)
+        })?;
+        Ok(result)
+    }
+
     pub async fn update_recipe(&self, id: i32, body: serde_json::Value) -> Result<Recipe> {
         let auth_header = self.get_auth_header()?;
         let url = format!("{}/api/recipe/{}/", self.base_url, id);

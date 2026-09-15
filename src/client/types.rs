@@ -403,6 +403,16 @@ pub struct RecipeImport {
     pub url: String,
 }
 
+#[derive(Debug, Serialize, Deserialize)]
+pub struct RecipeFromSourceResponse {
+    pub recipe: Option<serde_json::Value>,
+    pub recipe_id: Option<i64>,
+    pub images: Vec<serde_json::Value>,
+    pub error: bool,
+    pub msg: String,
+    pub duplicates: Vec<serde_json::Value>,
+}
+
 /// Standard paginated response wrapper used by most Tandoor API endpoints.
 ///
 /// This follows Django REST framework pagination format.

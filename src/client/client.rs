@@ -99,6 +99,7 @@ impl TandoorClient {
     }
 
     // Recipe operations
+    #[allow(clippy::too_many_arguments)]
     pub async fn search_recipes(
         &self,
         query: Option<&str>,

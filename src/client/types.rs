@@ -84,9 +84,9 @@ pub struct Recipe {
     /// Recipe image URL or path
     #[serde(default)]
     pub image: Option<String>,
-    /// User ID who created this recipe
+    /// User who created this recipe (id or full object depending on API version)
     #[serde(default)]
-    pub created_by: Option<i32>,
+    pub created_by: Option<serde_json::Value>,
     /// Original source URL if imported
     #[serde(default)]
     pub source_url: Option<String>,
@@ -355,7 +355,7 @@ pub struct ShoppingListEntry {
     /// Optional delay before showing this item
     pub delay_until: Option<DateTime<Utc>>,
     /// User who added this entry
-    pub created_by: i32,
+    pub created_by: serde_json::Value,
     /// User who marked this as completed
     pub completed_by: Option<i32>,
 }
@@ -371,7 +371,7 @@ pub struct MealPlan {
     pub meal_type: MealType,
     pub created: DateTime<Utc>,
     pub updated: DateTime<Utc>,
-    pub created_by: i32,
+    pub created_by: serde_json::Value,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -381,7 +381,7 @@ pub struct MealType {
     pub order: i32,
     pub color: String,
     pub default: bool,
-    pub created_by: i32,
+    pub created_by: serde_json::Value,
     pub icon: Option<String>,
 }
 
@@ -393,7 +393,7 @@ pub struct CookLog {
     pub rating: Option<i32>,
     pub comment: Option<String>,
     pub created: DateTime<Utc>,
-    pub created_by: i32,
+    pub created_by: serde_json::Value,
 }
 
 #[derive(Debug, Serialize, Deserialize)]

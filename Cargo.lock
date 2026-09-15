@@ -952,6 +952,7 @@ name = "mcp-tandoor"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "axum",
  "chrono",
  "env_logger",
  "log",
@@ -964,7 +965,6 @@ dependencies = [
  "serial_test",
  "test-log",
  "tokio",
- "tokio-util",
  "tracing",
  "tracing-subscriber",
  "urlencoding",
@@ -1355,7 +1355,6 @@ version = "0.3.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "1f0d0d5493be0d181a62db489eab7838669b81885972ca00ceca893cf6ac2883"
 dependencies = [
- "axum",
  "base64 0.22.1",
  "bytes",
  "chrono",

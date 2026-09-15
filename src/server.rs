@@ -343,6 +343,16 @@ impl TandoorMcpServer {
 
         tracing::info!("=== ensure_authenticated: not authenticated, proceeding with auth ===");
 
+        // Check if a pre-existing token is stored globally (e.g. from TANDOOR_AUTH_TOKEN)
+        if let Some(auth_storage) = GLOBAL_AUTH.get() {
+            let auth = auth_storage.lock().await;
+            if let Some(token) = auth.as_deref() {
+                tracing::info!("Using pre-existing global auth token");
+                client.set_token(token.to_string());
+                return Ok(client);
+            }
+        }
+
         // If no global token, try to authenticate with stored credentials directly
         if let Some((username, password)) = GLOBAL_CREDENTIALS.get() {
             tracing::info!(

@@ -109,7 +109,16 @@ jobs:
       - name: Create test user and get auth token
         run: |
           PYTHON=/opt/recipes/venv/bin/python
-          docker exec tandoor $PYTHON /opt/recipes/manage.py migrate --noinput
+          # Wait for the container's own startup migrations to finish
+          for i in $(seq 1 30); do
+            if docker exec tandoor $PYTHON /opt/recipes/manage.py showmigrations auth \
+                2>/dev/null | grep -q "\[X\]"; then
+              echo "Migrations complete"
+              break
+            fi
+            echo "Waiting for migrations... ($i/30)"
+            sleep 5
+          done
           docker exec tandoor $PYTHON /opt/recipes/manage.py createsuperuser \
             --username admin --email admin@test.local --noinput || true
           docker exec tandoor $PYTHON /opt/recipes/manage.py shell -c "

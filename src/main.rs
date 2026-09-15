@@ -15,8 +15,7 @@
 
 use mcp_tandoor::server::TandoorMcpServer;
 use rmcp::transport::streamable_http_server::{
-    StreamableHttpServerConfig, StreamableHttpService,
-    session::local::LocalSessionManager,
+    session::local::LocalSessionManager, StreamableHttpServerConfig, StreamableHttpService,
 };
 use std::env;
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
@@ -51,7 +50,10 @@ async fn main() -> anyhow::Result<()> {
             username.clone(),
             password.clone(),
         );
-        if let Err(e) = server.authenticate(username.clone(), password.clone()).await {
+        if let Err(e) = server
+            .authenticate(username.clone(), password.clone())
+            .await
+        {
             tracing::error!("Authentication failed: {}", e);
             tracing::error!("  - TANDOOR_BASE_URL: {}", base_url);
             tracing::error!("  - TANDOOR_USERNAME: {}", username);

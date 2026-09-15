@@ -1,0 +1,31 @@
+<?xml version="1.0"?>
+<Container version="2">
+  <Name>tandoor-mcp</Name>
+  <Repository>ghcr.io/ryanmac8/tandoor-mcp:latest</Repository>
+  <Registry>https://github.com/ryanmac8/tandoor-mcp/pkgs/container/tandoor-mcp</Registry>
+  <Network>bridge</Network>
+  <MyIP/>
+  <Shell>sh</Shell>
+  <Privileged>false</Privileged>
+  <Support>https://github.com/ryanmac8/tandoor-mcp/issues</Support>
+  <Project>https://github.com/ryanmac8/tandoor-mcp</Project>
+  <Overview>MCP (Model Context Protocol) server for Tandoor Recipes. Exposes recipe search, creation, shopping lists, meal planning, and pantry management as AI tools for Claude and other MCP clients.&#xD;&#xD;Uses Streamable HTTP transport on the /mcp endpoint. Add as a Claude custom connector at https://your-host:3091/mcp (no OAuth required).&#xD;&#xD;TANDOOR_AUTH_TOKEN is strongly preferred over username/password — Tandoor limits the login endpoint to 10 requests/day per IP. Get a token via: curl -X POST http://your-tandoor/api-token-auth/ -H "Content-Type: application/json" -d '{"username":"admin","password":"your-pass"}'&#xD;&#xD;To gate the connector with a key (recommended for public exposure): configure your reverse proxy to require a query param (e.g. ?key=YOUR_SECRET) and give Claude the full URL including the key. See project README for the Nginx/NPM config snippet.</Overview>
+  <Category>Productivity: Tools:</Category>
+  <WebUI/>
+  <TemplateURL>https://raw.githubusercontent.com/ryanmac8/tandoor-mcp/main/templates/tandoor-mcp-unraid.xml</TemplateURL>
+  <Icon>https://raw.githubusercontent.com/TandoorRecipes/recipes/master/vue/src/assets/logo.svg</Icon>
+  <ExtraParams>--restart=unless-stopped</ExtraParams>
+  <PostArgs/>
+  <CPUset/>
+  <DateInstalled/>
+  <DonateText/>
+  <DonateLink/>
+  <Requires/>
+  <Config Name="MCP Port" Target="3001" Default="3091" Mode="tcp" Description="Streamable HTTP MCP port. Claude connector URL: http://[IP]:[PORT]/mcp" Type="Port" Display="always" Required="true" Mask="false">3091</Config>
+  <Config Name="TANDOOR_BASE_URL" Target="TANDOOR_BASE_URL" Default="http://localhost:8080" Mode="" Description="Full URL of your Tandoor instance, reachable from inside this container." Type="Variable" Display="always" Required="true" Mask="false">http://localhost:8080</Config>
+  <Config Name="TANDOOR_AUTH_TOKEN" Target="TANDOOR_AUTH_TOKEN" Default="" Mode="" Description="Pre-existing Tandoor API token (tda_...). Preferred — bypasses the 10-req/day login rate limit. Leave blank to use username/password instead." Type="Variable" Display="always" Required="false" Mask="true"></Config>
+  <Config Name="TANDOOR_USERNAME" Target="TANDOOR_USERNAME" Default="admin" Mode="" Description="Tandoor username. Only used when TANDOOR_AUTH_TOKEN is not set." Type="Variable" Display="advanced" Required="false" Mask="false">admin</Config>
+  <Config Name="TANDOOR_PASSWORD" Target="TANDOOR_PASSWORD" Default="" Mode="" Description="Tandoor password. Only used when TANDOOR_AUTH_TOKEN is not set." Type="Variable" Display="advanced" Required="false" Mask="true"></Config>
+  <Config Name="BIND_ADDR" Target="BIND_ADDR" Default="0.0.0.0:3001" Mode="" Description="Address and port the server listens on inside the container. Change only if you remap the container port above." Type="Variable" Display="advanced" Required="false" Mask="false">0.0.0.0:3001</Config>
+  <Config Name="RUST_LOG" Target="RUST_LOG" Default="info" Mode="" Description="Log verbosity: error, warn, info, debug, or trace." Type="Variable" Display="advanced" Required="false" Mask="false">info</Config>
+</Container>

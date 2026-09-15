@@ -103,6 +103,11 @@ impl TandoorClient {
         &self,
         query: Option<&str>,
         limit: Option<i32>,
+        keywords: Option<&[i64]>,
+        foods: Option<&[i64]>,
+        max_cooking_time: Option<i64>,
+        min_rating: Option<i64>,
+        random: Option<bool>,
     ) -> Result<PaginatedResponse<Recipe>> {
         let auth_header = self.get_auth_header()?;
         let mut url = format!("{}/api/recipe/", self.base_url);
@@ -113,6 +118,25 @@ impl TandoorClient {
         }
         if let Some(l) = limit {
             params.push(format!("page_size={l}"));
+        }
+        if let Some(kws) = keywords {
+            for kw in kws {
+                params.push(format!("keywords_or={kw}"));
+            }
+        }
+        if let Some(fs) = foods {
+            for f in fs {
+                params.push(format!("foods_or={f}"));
+            }
+        }
+        if let Some(t) = max_cooking_time {
+            params.push(format!("cooking_time={t}"));
+        }
+        if let Some(r) = min_rating {
+            params.push(format!("rating={r}"));
+        }
+        if let Some(true) = random {
+            params.push("random=true".to_string());
         }
 
         if !params.is_empty() {
@@ -909,5 +933,225 @@ impl TandoorClient {
 
         tracing::debug!("Successfully retrieved {} units", units.count);
         Ok(units)
+    }
+
+    pub async fn update_recipe(
+        &self,
+        id: i32,
+        body: serde_json::Value,
+    ) -> Result<Recipe> {
+        let auth_header = self.get_auth_header()?;
+        let url = format!("{}/api/recipe/{}/", self.base_url, id);
+
+        let response = self
+            .client
+            .patch(&url)
+            .header("Authorization", auth_header)
+            .json(&body)
+            .send()
+            .await
+            .map_err(|e| anyhow::anyhow!("Failed to connect to Tandoor API: {}", e))?;
+
+        let status = response.status();
+        if !status.is_success() {
+            let error_body = response.text().await.unwrap_or_default();
+            anyhow::bail!("Failed to update recipe {}: {} - {}", id, status, error_body);
+        }
+
+        let recipe = response.json().await?;
+        Ok(recipe)
+    }
+
+    pub async fn delete_recipe(&self, id: i32) -> Result<()> {
+        let auth_header = self.get_auth_header()?;
+        let url = format!("{}/api/recipe/{}/", self.base_url, id);
+
+        let response = self
+            .client
+            .delete(&url)
+            .header("Authorization", auth_header)
+            .send()
+            .await
+            .map_err(|e| anyhow::anyhow!("Failed to connect to Tandoor API: {}", e))?;
+
+        if !response.status().is_success() {
+            anyhow::bail!("Failed to delete recipe {}: {}", id, response.status());
+        }
+        Ok(())
+    }
+
+    pub async fn get_recipe_books(&self, query: Option<&str>) -> Result<PaginatedResponse<RecipeBook>> {
+        let auth_header = self.get_auth_header()?;
+        let mut url = format!("{}/api/recipe-book/", self.base_url);
+        if let Some(q) = query {
+            url.push_str(&format!("?query={}", urlencoding::encode(q)));
+        }
+
+        let response = self
+            .client
+            .get(&url)
+            .header("Authorization", auth_header)
+            .send()
+            .await
+            .map_err(|e| anyhow::anyhow!("Failed to connect to Tandoor API: {}", e))?;
+
+        if !response.status().is_success() {
+            anyhow::bail!("Failed to get recipe books: {}", response.status());
+        }
+        let books = response.json().await?;
+        Ok(books)
+    }
+
+    pub async fn create_recipe_book(&self, request: CreateRecipeBookRequest) -> Result<RecipeBook> {
+        let auth_header = self.get_auth_header()?;
+        let url = format!("{}/api/recipe-book/", self.base_url);
+
+        let response = self
+            .client
+            .post(&url)
+            .header("Authorization", auth_header)
+            .json(&request)
+            .send()
+            .await
+            .map_err(|e| anyhow::anyhow!("Failed to connect to Tandoor API: {}", e))?;
+
+        let status = response.status();
+        if !status.is_success() {
+            let error_body = response.text().await.unwrap_or_default();
+            anyhow::bail!("Failed to create recipe book: {} - {}", status, error_body);
+        }
+        let book = response.json().await?;
+        Ok(book)
+    }
+
+    pub async fn delete_recipe_book(&self, id: i32) -> Result<()> {
+        let auth_header = self.get_auth_header()?;
+        let url = format!("{}/api/recipe-book/{}/", self.base_url, id);
+
+        let response = self
+            .client
+            .delete(&url)
+            .header("Authorization", auth_header)
+            .send()
+            .await
+            .map_err(|e| anyhow::anyhow!("Failed to connect to Tandoor API: {}", e))?;
+
+        if !response.status().is_success() {
+            anyhow::bail!("Failed to delete recipe book {}: {}", id, response.status());
+        }
+        Ok(())
+    }
+
+    pub async fn get_recipe_book_entries(
+        &self,
+        book_id: Option<i32>,
+    ) -> Result<PaginatedResponse<RecipeBookEntry>> {
+        let auth_header = self.get_auth_header()?;
+        let mut url = format!("{}/api/recipe-book-entry/", self.base_url);
+        if let Some(b) = book_id {
+            url.push_str(&format!("?book={b}"));
+        }
+
+        let response = self
+            .client
+            .get(&url)
+            .header("Authorization", auth_header)
+            .send()
+            .await
+            .map_err(|e| anyhow::anyhow!("Failed to connect to Tandoor API: {}", e))?;
+
+        if !response.status().is_success() {
+            anyhow::bail!("Failed to get recipe book entries: {}", response.status());
+        }
+        let entries = response.json().await?;
+        Ok(entries)
+    }
+
+    pub async fn add_to_recipe_book(&self, request: CreateRecipeBookEntryRequest) -> Result<RecipeBookEntry> {
+        let auth_header = self.get_auth_header()?;
+        let url = format!("{}/api/recipe-book-entry/", self.base_url);
+
+        let response = self
+            .client
+            .post(&url)
+            .header("Authorization", auth_header)
+            .json(&request)
+            .send()
+            .await
+            .map_err(|e| anyhow::anyhow!("Failed to connect to Tandoor API: {}", e))?;
+
+        let status = response.status();
+        if !status.is_success() {
+            let error_body = response.text().await.unwrap_or_default();
+            anyhow::bail!("Failed to add recipe to book: {} - {}", status, error_body);
+        }
+        let entry = response.json().await?;
+        Ok(entry)
+    }
+
+    pub async fn remove_from_recipe_book(&self, entry_id: i32) -> Result<()> {
+        let auth_header = self.get_auth_header()?;
+        let url = format!("{}/api/recipe-book-entry/{}/", self.base_url, entry_id);
+
+        let response = self
+            .client
+            .delete(&url)
+            .header("Authorization", auth_header)
+            .send()
+            .await
+            .map_err(|e| anyhow::anyhow!("Failed to connect to Tandoor API: {}", e))?;
+
+        if !response.status().is_success() {
+            anyhow::bail!(
+                "Failed to remove recipe book entry {}: {}",
+                entry_id,
+                response.status()
+            );
+        }
+        Ok(())
+    }
+
+    pub async fn get_supermarkets(&self) -> Result<PaginatedResponse<Supermarket>> {
+        let auth_header = self.get_auth_header()?;
+        let url = format!("{}/api/supermarket/", self.base_url);
+
+        let response = self
+            .client
+            .get(&url)
+            .header("Authorization", auth_header)
+            .send()
+            .await
+            .map_err(|e| anyhow::anyhow!("Failed to connect to Tandoor API: {}", e))?;
+
+        if !response.status().is_success() {
+            anyhow::bail!("Failed to get supermarkets: {}", response.status());
+        }
+        let supermarkets = response.json().await?;
+        Ok(supermarkets)
+    }
+
+    pub async fn get_unit_conversions(
+        &self,
+        food_id: Option<i64>,
+    ) -> Result<PaginatedResponse<UnitConversion>> {
+        let auth_header = self.get_auth_header()?;
+        let mut url = format!("{}/api/unit-conversion/", self.base_url);
+        if let Some(f) = food_id {
+            url.push_str(&format!("?food={f}"));
+        }
+
+        let response = self
+            .client
+            .get(&url)
+            .header("Authorization", auth_header)
+            .send()
+            .await
+            .map_err(|e| anyhow::anyhow!("Failed to connect to Tandoor API: {}", e))?;
+
+        if !response.status().is_success() {
+            anyhow::bail!("Failed to get unit conversions: {}", response.status());
+        }
+        let conversions = response.json().await?;
+        Ok(conversions)
     }
 }

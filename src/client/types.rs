@@ -287,7 +287,9 @@ pub struct Food {
     pub description: Option<String>,
     pub recipe: Option<i32>,
     pub food_onhand: bool,
-    pub supermarket_category: Option<i32>,
+    #[serde(default)]
+    pub substitute_onhand: bool,
+    pub supermarket_category: Option<serde_json::Value>,
     pub inherit_fields: Vec<InheritField>,
     pub properties: Vec<FoodProperty>,
 }
@@ -503,4 +505,56 @@ pub struct UpdateShoppingListEntryRequest {
 #[derive(Debug, Serialize)]
 pub struct BulkShoppingListRequest {
     pub entries: Vec<CreateShoppingListEntryRequest>,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct RecipeBook {
+    pub id: i32,
+    pub name: String,
+    pub description: Option<String>,
+    #[serde(default)]
+    pub shared: Vec<serde_json::Value>,
+    pub filter: Option<serde_json::Value>,
+    pub order: Option<i32>,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct RecipeBookEntry {
+    pub id: i32,
+    pub book: i32,
+    pub book_content: Option<serde_json::Value>,
+    pub recipe: i32,
+    pub recipe_content: Option<serde_json::Value>,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct Supermarket {
+    pub id: i32,
+    pub name: String,
+    pub description: Option<String>,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct UnitConversion {
+    pub id: i32,
+    pub name: Option<String>,
+    pub base_amount: f64,
+    pub base_unit: Option<serde_json::Value>,
+    pub converted_amount: f64,
+    pub converted_unit: Option<serde_json::Value>,
+    pub food: Option<serde_json::Value>,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct CreateRecipeBookRequest {
+    pub name: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
+    pub shared: Vec<serde_json::Value>,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct CreateRecipeBookEntryRequest {
+    pub book: i32,
+    pub recipe: i32,
 }

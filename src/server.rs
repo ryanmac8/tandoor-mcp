@@ -41,6 +41,21 @@ pub struct SearchRecipesParams {
     pub query: Option<String>,
     #[serde(default)]
     pub limit: Option<i32>,
+    /// Keyword IDs to filter by (OR logic)
+    #[serde(default)]
+    pub keywords: Option<Vec<i64>>,
+    /// Food IDs to filter by (OR logic)
+    #[serde(default)]
+    pub foods: Option<Vec<i64>>,
+    /// Maximum total cooking time in minutes
+    #[serde(default)]
+    pub max_cooking_time: Option<i64>,
+    /// Minimum rating (0-5)
+    #[serde(default)]
+    pub min_rating: Option<i64>,
+    /// Return a random recipe
+    #[serde(default)]
+    pub random: Option<bool>,
 }
 
 #[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
@@ -204,6 +219,83 @@ fn default_mode() -> String {
 
 fn default_days_until_expiry() -> i32 {
     3
+}
+
+#[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
+pub struct UpdateRecipeParams {
+    pub id: i32,
+    #[serde(default)]
+    pub name: Option<String>,
+    #[serde(default)]
+    pub description: Option<String>,
+    /// List of keyword IDs to assign
+    #[serde(default)]
+    pub keywords: Option<Vec<i64>>,
+    #[serde(default)]
+    pub servings: Option<i64>,
+    #[serde(default)]
+    pub cooking_time: Option<i64>,
+    #[serde(default)]
+    pub waiting_time: Option<i64>,
+    #[serde(default)]
+    pub source_url: Option<String>,
+    #[serde(default)]
+    pub source_title: Option<String>,
+}
+
+#[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
+pub struct DeleteRecipeParams {
+    pub id: i32,
+}
+
+#[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
+pub struct GetRecipeBooksParams {
+    #[serde(default)]
+    pub query: Option<String>,
+}
+
+#[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
+pub struct CreateRecipeBookParams {
+    pub name: String,
+    #[serde(default)]
+    pub description: Option<String>,
+}
+
+#[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
+pub struct DeleteRecipeBookParams {
+    pub id: i32,
+}
+
+#[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
+pub struct AddToRecipeBookParams {
+    pub recipe_book: i32,
+    pub recipe: i32,
+}
+
+#[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
+pub struct RemoveFromRecipeBookParams {
+    pub id: i32,
+}
+
+#[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
+pub struct GetRecipeBookEntriesParams {
+    #[serde(default)]
+    pub book_id: Option<i32>,
+}
+
+#[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
+pub struct AddMealPlanToShoppingListParams {
+    pub from_date: String,
+    pub to_date: String,
+}
+
+#[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
+pub struct GetSupermarketsParams {}
+
+#[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
+pub struct GetUnitConversionsParams {
+    #[serde(default)]
+    pub food_id: Option<i64>,
 }
 
 // Global shared authentication state
@@ -421,7 +513,15 @@ impl TandoorMcpServer {
         };
 
         match client
-            .search_recipes(params.query.as_deref(), params.limit)
+            .search_recipes(
+                params.query.as_deref(),
+                params.limit,
+                params.keywords.as_deref(),
+                params.foods.as_deref(),
+                params.max_cooking_time,
+                params.min_rating,
+                params.random,
+            )
             .await
         {
             Ok(response) => {
@@ -435,6 +535,8 @@ impl TandoorMcpServer {
                             "total_time": recipe.working_time.unwrap_or(0) + recipe.waiting_time.unwrap_or(0),
                             "servings": recipe.servings,
                             "keywords": recipe.keywords.into_iter().map(|k| k.name).collect::<Vec<String>>(),
+                            "rating": recipe.rating,
+                            "last_cooked": recipe.last_cooked,
                             "created": recipe.created,
                             "updated": recipe.updated
                         })
@@ -1735,7 +1837,7 @@ impl TandoorMcpServer {
                 let available_foods: Vec<&crate::client::types::Food> = foods_response
                     .results
                     .iter()
-                    .filter(|food| food.food_onhand)
+                    .filter(|food| food.food_onhand || food.substitute_onhand)
                     .collect();
 
                 if available_foods.is_empty() {
@@ -1750,7 +1852,7 @@ impl TandoorMcpServer {
                 }
 
                 // Search for recipes that can use these ingredients
-                match client.search_recipes(None, Some(20)).await {
+                match client.search_recipes(None, Some(20), None, None, None, None, None).await {
                     Ok(recipes_response) => {
                         let mut recipe_suggestions = Vec::new();
 
@@ -1872,6 +1974,514 @@ impl TandoorMcpServer {
                     error.to_string(),
                 )]))
             }
+        }
+    }
+
+    #[tool(description = "Update fields on an existing recipe (name, description, keywords, servings, cooking_time, waiting_time, source_url)")]
+    async fn update_recipe(
+        &self,
+        Parameters(params): Parameters<UpdateRecipeParams>,
+    ) -> Result<CallToolResult, McpError> {
+        let client = match self.ensure_authenticated().await {
+            Ok(c) => c,
+            Err(e) => {
+                return Ok(CallToolResult::error(vec![Content::text(
+                    json!({"error": "Authentication Error", "details": e.to_string()}).to_string(),
+                )]));
+            }
+        };
+
+        let mut body = serde_json::Map::new();
+        body.insert("id".to_string(), json!(params.id));
+        if let Some(v) = params.name {
+            body.insert("name".to_string(), json!(v));
+        }
+        if let Some(v) = params.description {
+            body.insert("description".to_string(), json!(v));
+        }
+        if let Some(v) = params.servings {
+            body.insert("servings".to_string(), json!(v));
+        }
+        if let Some(v) = params.cooking_time {
+            body.insert("working_time".to_string(), json!(v));
+        }
+        if let Some(v) = params.waiting_time {
+            body.insert("waiting_time".to_string(), json!(v));
+        }
+        if let Some(v) = params.source_url {
+            body.insert("source_url".to_string(), json!(v));
+        }
+        if let Some(kws) = params.keywords {
+            let kw_list: Vec<serde_json::Value> =
+                kws.iter().map(|id| json!({"id": id})).collect();
+            body.insert("keywords".to_string(), json!(kw_list));
+        }
+
+        match client
+            .update_recipe(params.id, serde_json::Value::Object(body))
+            .await
+        {
+            Ok(recipe) => Ok(CallToolResult::success(vec![Content::text(
+                serde_json::to_string_pretty(&json!({
+                    "id": recipe.id,
+                    "name": recipe.name,
+                    "description": recipe.description,
+                    "servings": recipe.servings,
+                    "working_time": recipe.working_time,
+                    "waiting_time": recipe.waiting_time,
+                    "keywords": recipe.keywords.into_iter().map(|k| k.name).collect::<Vec<_>>(),
+                    "updated": recipe.updated
+                }))
+                .unwrap(),
+            )])),
+            Err(e) => Ok(CallToolResult::error(vec![Content::text(
+                json!({"error": "Failed to update recipe", "details": e.to_string()}).to_string(),
+            )])),
+        }
+    }
+
+    #[tool(description = "Delete a recipe permanently")]
+    async fn delete_recipe(
+        &self,
+        Parameters(params): Parameters<DeleteRecipeParams>,
+    ) -> Result<CallToolResult, McpError> {
+        let client = match self.ensure_authenticated().await {
+            Ok(c) => c,
+            Err(e) => {
+                return Ok(CallToolResult::error(vec![Content::text(
+                    json!({"error": "Authentication Error", "details": e.to_string()}).to_string(),
+                )]));
+            }
+        };
+
+        match client.delete_recipe(params.id).await {
+            Ok(()) => Ok(CallToolResult::success(vec![Content::text(
+                json!({"message": format!("Recipe {} deleted successfully", params.id)}).to_string(),
+            )])),
+            Err(e) => Ok(CallToolResult::error(vec![Content::text(
+                json!({"error": "Failed to delete recipe", "details": e.to_string()}).to_string(),
+            )])),
+        }
+    }
+
+    #[tool(description = "List all recipe books/collections, optionally filtered by name")]
+    async fn get_recipe_books(
+        &self,
+        Parameters(params): Parameters<GetRecipeBooksParams>,
+    ) -> Result<CallToolResult, McpError> {
+        let client = match self.ensure_authenticated().await {
+            Ok(c) => c,
+            Err(e) => {
+                return Ok(CallToolResult::error(vec![Content::text(
+                    json!({"error": "Authentication Error", "details": e.to_string()}).to_string(),
+                )]));
+            }
+        };
+
+        match client.get_recipe_books(params.query.as_deref()).await {
+            Ok(response) => {
+                let books_json: Vec<serde_json::Value> = response
+                    .results
+                    .into_iter()
+                    .map(|b| {
+                        json!({"id": b.id, "name": b.name, "description": b.description, "order": b.order})
+                    })
+                    .collect();
+                Ok(CallToolResult::success(vec![Content::text(
+                    serde_json::to_string_pretty(
+                        &json!({"books": books_json, "total": response.count}),
+                    )
+                    .unwrap(),
+                )]))
+            }
+            Err(e) => Ok(CallToolResult::error(vec![Content::text(
+                json!({"error": "Failed to get recipe books", "details": e.to_string()})
+                    .to_string(),
+            )])),
+        }
+    }
+
+    #[tool(description = "Create a new recipe book/collection")]
+    async fn create_recipe_book(
+        &self,
+        Parameters(params): Parameters<CreateRecipeBookParams>,
+    ) -> Result<CallToolResult, McpError> {
+        let client = match self.ensure_authenticated().await {
+            Ok(c) => c,
+            Err(e) => {
+                return Ok(CallToolResult::error(vec![Content::text(
+                    json!({"error": "Authentication Error", "details": e.to_string()}).to_string(),
+                )]));
+            }
+        };
+
+        let request = crate::client::types::CreateRecipeBookRequest {
+            name: params.name,
+            description: params.description,
+            shared: vec![],
+        };
+
+        match client.create_recipe_book(request).await {
+            Ok(book) => Ok(CallToolResult::success(vec![Content::text(
+                serde_json::to_string_pretty(
+                    &json!({"id": book.id, "name": book.name, "description": book.description}),
+                )
+                .unwrap(),
+            )])),
+            Err(e) => Ok(CallToolResult::error(vec![Content::text(
+                json!({"error": "Failed to create recipe book", "details": e.to_string()})
+                    .to_string(),
+            )])),
+        }
+    }
+
+    #[tool(description = "Delete a recipe book/collection by ID")]
+    async fn delete_recipe_book(
+        &self,
+        Parameters(params): Parameters<DeleteRecipeBookParams>,
+    ) -> Result<CallToolResult, McpError> {
+        let client = match self.ensure_authenticated().await {
+            Ok(c) => c,
+            Err(e) => {
+                return Ok(CallToolResult::error(vec![Content::text(
+                    json!({"error": "Authentication Error", "details": e.to_string()}).to_string(),
+                )]));
+            }
+        };
+
+        match client.delete_recipe_book(params.id).await {
+            Ok(()) => Ok(CallToolResult::success(vec![Content::text(
+                json!({"message": format!("Recipe book {} deleted", params.id)}).to_string(),
+            )])),
+            Err(e) => Ok(CallToolResult::error(vec![Content::text(
+                json!({"error": "Failed to delete recipe book", "details": e.to_string()})
+                    .to_string(),
+            )])),
+        }
+    }
+
+    #[tool(description = "Add a recipe to a recipe book. Returns the entry ID needed to remove it later.")]
+    async fn add_to_recipe_book(
+        &self,
+        Parameters(params): Parameters<AddToRecipeBookParams>,
+    ) -> Result<CallToolResult, McpError> {
+        let client = match self.ensure_authenticated().await {
+            Ok(c) => c,
+            Err(e) => {
+                return Ok(CallToolResult::error(vec![Content::text(
+                    json!({"error": "Authentication Error", "details": e.to_string()}).to_string(),
+                )]));
+            }
+        };
+
+        let request = crate::client::types::CreateRecipeBookEntryRequest {
+            book: params.recipe_book,
+            recipe: params.recipe,
+        };
+
+        match client.add_to_recipe_book(request).await {
+            Ok(entry) => {
+                let recipe_name = entry
+                    .recipe_content
+                    .as_ref()
+                    .and_then(|r| r.get("name"))
+                    .and_then(|n| n.as_str())
+                    .unwrap_or("unknown");
+                let book_name = entry
+                    .book_content
+                    .as_ref()
+                    .and_then(|b| b.get("name"))
+                    .and_then(|n| n.as_str())
+                    .unwrap_or("unknown");
+                Ok(CallToolResult::success(vec![Content::text(
+                    serde_json::to_string_pretty(&json!({
+                        "entry_id": entry.id,
+                        "recipe_id": entry.recipe,
+                        "recipe_name": recipe_name,
+                        "book_id": entry.book,
+                        "book_name": book_name,
+                        "message": format!("Added '{}' to book '{}'", recipe_name, book_name)
+                    }))
+                    .unwrap(),
+                )]))
+            }
+            Err(e) => Ok(CallToolResult::error(vec![Content::text(
+                json!({"error": "Failed to add recipe to book", "details": e.to_string()})
+                    .to_string(),
+            )])),
+        }
+    }
+
+    #[tool(description = "Remove a recipe from a recipe book by entry ID. Use get_recipe_book_entries to find the entry ID.")]
+    async fn remove_from_recipe_book(
+        &self,
+        Parameters(params): Parameters<RemoveFromRecipeBookParams>,
+    ) -> Result<CallToolResult, McpError> {
+        let client = match self.ensure_authenticated().await {
+            Ok(c) => c,
+            Err(e) => {
+                return Ok(CallToolResult::error(vec![Content::text(
+                    json!({"error": "Authentication Error", "details": e.to_string()}).to_string(),
+                )]));
+            }
+        };
+
+        match client.remove_from_recipe_book(params.id).await {
+            Ok(()) => Ok(CallToolResult::success(vec![Content::text(
+                json!({"message": format!("Removed recipe book entry {}", params.id)}).to_string(),
+            )])),
+            Err(e) => Ok(CallToolResult::error(vec![Content::text(
+                json!({"error": "Failed to remove from recipe book", "details": e.to_string()})
+                    .to_string(),
+            )])),
+        }
+    }
+
+    #[tool(description = "List which recipes are in which recipe books")]
+    async fn get_recipe_book_entries(
+        &self,
+        Parameters(params): Parameters<GetRecipeBookEntriesParams>,
+    ) -> Result<CallToolResult, McpError> {
+        let client = match self.ensure_authenticated().await {
+            Ok(c) => c,
+            Err(e) => {
+                return Ok(CallToolResult::error(vec![Content::text(
+                    json!({"error": "Authentication Error", "details": e.to_string()}).to_string(),
+                )]));
+            }
+        };
+
+        match client.get_recipe_book_entries(params.book_id).await {
+            Ok(response) => {
+                let entries_json: Vec<serde_json::Value> = response
+                    .results
+                    .into_iter()
+                    .map(|e| {
+                        let recipe_name = e
+                            .recipe_content
+                            .as_ref()
+                            .and_then(|r| r.get("name"))
+                            .and_then(|n| n.as_str())
+                            .unwrap_or("unknown");
+                        let book_name = e
+                            .book_content
+                            .as_ref()
+                            .and_then(|b| b.get("name"))
+                            .and_then(|n| n.as_str())
+                            .unwrap_or("unknown");
+                        json!({
+                            "entry_id": e.id,
+                            "recipe_id": e.recipe,
+                            "recipe_name": recipe_name,
+                            "book_id": e.book,
+                            "book_name": book_name
+                        })
+                    })
+                    .collect();
+                Ok(CallToolResult::success(vec![Content::text(
+                    serde_json::to_string_pretty(
+                        &json!({"entries": entries_json, "total": response.count}),
+                    )
+                    .unwrap(),
+                )]))
+            }
+            Err(e) => Ok(CallToolResult::error(vec![Content::text(
+                json!({"error": "Failed to get recipe book entries", "details": e.to_string()})
+                    .to_string(),
+            )])),
+        }
+    }
+
+    #[tool(description = "Add all recipe ingredients from meal plans in a date range to the shopping list")]
+    async fn add_meal_plan_to_shopping_list(
+        &self,
+        Parameters(params): Parameters<AddMealPlanToShoppingListParams>,
+    ) -> Result<CallToolResult, McpError> {
+        let client = match self.ensure_authenticated().await {
+            Ok(c) => c,
+            Err(e) => {
+                return Ok(CallToolResult::error(vec![Content::text(
+                    json!({"error": "Authentication Error", "details": e.to_string()}).to_string(),
+                )]));
+            }
+        };
+
+        let meal_plans = match client
+            .get_meal_plans(Some(&params.from_date), Some(&params.to_date))
+            .await
+        {
+            Ok(r) => r.results,
+            Err(e) => {
+                return Ok(CallToolResult::error(vec![Content::text(
+                    json!({"error": "Failed to get meal plans", "details": e.to_string()})
+                        .to_string(),
+                )]));
+            }
+        };
+
+        let mut added = 0usize;
+        let mut skipped = 0usize;
+        let mut added_items: Vec<serde_json::Value> = Vec::new();
+
+        for plan in &meal_plans {
+            let recipe = match &plan.recipe {
+                Some(r) => r,
+                None => {
+                    skipped += 1;
+                    continue;
+                }
+            };
+
+            let detailed = match client.get_recipe(recipe.id).await {
+                Ok(r) => r,
+                Err(_) => {
+                    skipped += 1;
+                    continue;
+                }
+            };
+
+            let scale = plan.servings as f64 / detailed.servings.unwrap_or(1) as f64;
+
+            for step in &detailed.steps {
+                for ingredient in &step.ingredients {
+                    if ingredient.is_header || ingredient.no_amount {
+                        continue;
+                    }
+                    let request = crate::client::types::CreateShoppingListEntryRequest {
+                        food: ingredient.food.id,
+                        unit: ingredient.unit.as_ref().map(|u| u.id),
+                        amount: (ingredient.amount * scale * 10.0).round() / 10.0,
+                    };
+                    match client.add_to_shopping_list(request).await {
+                        Ok(_) => {
+                            added += 1;
+                            added_items.push(json!({
+                                "food": ingredient.food.name,
+                                "amount": (ingredient.amount * scale * 10.0).round() / 10.0,
+                                "unit": ingredient.unit.as_ref().map(|u| &u.name),
+                                "from_recipe": recipe.name
+                            }));
+                        }
+                        Err(_) => {
+                            skipped += 1;
+                        }
+                    }
+                }
+            }
+        }
+
+        Ok(CallToolResult::success(vec![Content::text(
+            serde_json::to_string_pretty(&json!({
+                "added": added,
+                "skipped": skipped,
+                "meal_plans_processed": meal_plans.len(),
+                "items": added_items,
+                "message": format!(
+                    "Added {} ingredients to shopping list from {} meal plans ({} to {})",
+                    added,
+                    meal_plans.len(),
+                    params.from_date,
+                    params.to_date
+                )
+            }))
+            .unwrap(),
+        )]))
+    }
+
+    #[tool(description = "List supermarkets/stores configured in Tandoor (used for organizing shopping lists by store)")]
+    async fn get_supermarkets(
+        &self,
+        Parameters(_params): Parameters<GetSupermarketsParams>,
+    ) -> Result<CallToolResult, McpError> {
+        let client = match self.ensure_authenticated().await {
+            Ok(c) => c,
+            Err(e) => {
+                return Ok(CallToolResult::error(vec![Content::text(
+                    json!({"error": "Authentication Error", "details": e.to_string()}).to_string(),
+                )]));
+            }
+        };
+
+        match client.get_supermarkets().await {
+            Ok(response) => {
+                let stores: Vec<serde_json::Value> = response
+                    .results
+                    .into_iter()
+                    .map(|s| json!({"id": s.id, "name": s.name, "description": s.description}))
+                    .collect();
+                Ok(CallToolResult::success(vec![Content::text(
+                    serde_json::to_string_pretty(
+                        &json!({"supermarkets": stores, "total": response.count}),
+                    )
+                    .unwrap(),
+                )]))
+            }
+            Err(e) => Ok(CallToolResult::error(vec![Content::text(
+                json!({"error": "Failed to get supermarkets", "details": e.to_string()})
+                    .to_string(),
+            )])),
+        }
+    }
+
+    #[tool(description = "List unit conversions, optionally filtered by food ID")]
+    async fn get_unit_conversions(
+        &self,
+        Parameters(params): Parameters<GetUnitConversionsParams>,
+    ) -> Result<CallToolResult, McpError> {
+        let client = match self.ensure_authenticated().await {
+            Ok(c) => c,
+            Err(e) => {
+                return Ok(CallToolResult::error(vec![Content::text(
+                    json!({"error": "Authentication Error", "details": e.to_string()}).to_string(),
+                )]));
+            }
+        };
+
+        match client.get_unit_conversions(params.food_id).await {
+            Ok(response) => {
+                let conversions: Vec<serde_json::Value> = response
+                    .results
+                    .into_iter()
+                    .map(|c| {
+                        let base_unit = c
+                            .base_unit
+                            .as_ref()
+                            .and_then(|u| u.get("name"))
+                            .and_then(|n| n.as_str())
+                            .unwrap_or("?");
+                        let conv_unit = c
+                            .converted_unit
+                            .as_ref()
+                            .and_then(|u| u.get("name"))
+                            .and_then(|n| n.as_str())
+                            .unwrap_or("?");
+                        let food_name = c
+                            .food
+                            .as_ref()
+                            .and_then(|f| f.get("name"))
+                            .and_then(|n| n.as_str())
+                            .unwrap_or("?");
+                        json!({
+                            "id": c.id,
+                            "food": food_name,
+                            "base_amount": c.base_amount,
+                            "base_unit": base_unit,
+                            "converted_amount": c.converted_amount,
+                            "converted_unit": conv_unit
+                        })
+                    })
+                    .collect();
+                Ok(CallToolResult::success(vec![Content::text(
+                    serde_json::to_string_pretty(
+                        &json!({"conversions": conversions, "total": response.count}),
+                    )
+                    .unwrap(),
+                )]))
+            }
+            Err(e) => Ok(CallToolResult::error(vec![Content::text(
+                json!({"error": "Failed to get unit conversions", "details": e.to_string()})
+                    .to_string(),
+            )])),
         }
     }
 }

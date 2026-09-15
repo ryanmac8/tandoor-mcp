@@ -84,6 +84,7 @@ jobs:
             -e POSTGRES_PASSWORD=tandoor \
             -e SECRET_KEY=ci-test-secret-key \
             -e TANDOOR_PORT=8080 \
+            -e ALLOWED_HOSTS="*" \
             vabene1111/recipes:latest
 
       - name: Wait for Tandoor to be ready

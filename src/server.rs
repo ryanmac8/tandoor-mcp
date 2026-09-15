@@ -1852,7 +1852,10 @@ impl TandoorMcpServer {
                 }
 
                 // Search for recipes that can use these ingredients
-                match client.search_recipes(None, Some(20), None, None, None, None, None).await {
+                match client
+                    .search_recipes(None, Some(20), None, None, None, None, None)
+                    .await
+                {
                     Ok(recipes_response) => {
                         let mut recipe_suggestions = Vec::new();
 
@@ -1977,7 +1980,9 @@ impl TandoorMcpServer {
         }
     }
 
-    #[tool(description = "Update fields on an existing recipe (name, description, keywords, servings, cooking_time, waiting_time, source_url)")]
+    #[tool(
+        description = "Update fields on an existing recipe (name, description, keywords, servings, cooking_time, waiting_time, source_url)"
+    )]
     async fn update_recipe(
         &self,
         Parameters(params): Parameters<UpdateRecipeParams>,
@@ -2012,8 +2017,7 @@ impl TandoorMcpServer {
             body.insert("source_url".to_string(), json!(v));
         }
         if let Some(kws) = params.keywords {
-            let kw_list: Vec<serde_json::Value> =
-                kws.iter().map(|id| json!({"id": id})).collect();
+            let kw_list: Vec<serde_json::Value> = kws.iter().map(|id| json!({"id": id})).collect();
             body.insert("keywords".to_string(), json!(kw_list));
         }
 
@@ -2056,7 +2060,8 @@ impl TandoorMcpServer {
 
         match client.delete_recipe(params.id).await {
             Ok(()) => Ok(CallToolResult::success(vec![Content::text(
-                json!({"message": format!("Recipe {} deleted successfully", params.id)}).to_string(),
+                json!({"message": format!("Recipe {} deleted successfully", params.id)})
+                    .to_string(),
             )])),
             Err(e) => Ok(CallToolResult::error(vec![Content::text(
                 json!({"error": "Failed to delete recipe", "details": e.to_string()}).to_string(),
@@ -2160,7 +2165,9 @@ impl TandoorMcpServer {
         }
     }
 
-    #[tool(description = "Add a recipe to a recipe book. Returns the entry ID needed to remove it later.")]
+    #[tool(
+        description = "Add a recipe to a recipe book. Returns the entry ID needed to remove it later."
+    )]
     async fn add_to_recipe_book(
         &self,
         Parameters(params): Parameters<AddToRecipeBookParams>,
@@ -2212,7 +2219,9 @@ impl TandoorMcpServer {
         }
     }
 
-    #[tool(description = "Remove a recipe from a recipe book by entry ID. Use get_recipe_book_entries to find the entry ID.")]
+    #[tool(
+        description = "Remove a recipe from a recipe book by entry ID. Use get_recipe_book_entries to find the entry ID."
+    )]
     async fn remove_from_recipe_book(
         &self,
         Parameters(params): Parameters<RemoveFromRecipeBookParams>,
@@ -2292,7 +2301,9 @@ impl TandoorMcpServer {
         }
     }
 
-    #[tool(description = "Add all recipe ingredients from meal plans in a date range to the shopping list")]
+    #[tool(
+        description = "Add all recipe ingredients from meal plans in a date range to the shopping list"
+    )]
     async fn add_meal_plan_to_shopping_list(
         &self,
         Parameters(params): Parameters<AddMealPlanToShoppingListParams>,
@@ -2388,7 +2399,9 @@ impl TandoorMcpServer {
         )]))
     }
 
-    #[tool(description = "List supermarkets/stores configured in Tandoor (used for organizing shopping lists by store)")]
+    #[tool(
+        description = "List supermarkets/stores configured in Tandoor (used for organizing shopping lists by store)"
+    )]
     async fn get_supermarkets(
         &self,
         Parameters(_params): Parameters<GetSupermarketsParams>,

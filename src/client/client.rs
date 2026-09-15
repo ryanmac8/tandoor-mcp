@@ -935,11 +935,7 @@ impl TandoorClient {
         Ok(units)
     }
 
-    pub async fn update_recipe(
-        &self,
-        id: i32,
-        body: serde_json::Value,
-    ) -> Result<Recipe> {
+    pub async fn update_recipe(&self, id: i32, body: serde_json::Value) -> Result<Recipe> {
         let auth_header = self.get_auth_header()?;
         let url = format!("{}/api/recipe/{}/", self.base_url, id);
 
@@ -955,7 +951,12 @@ impl TandoorClient {
         let status = response.status();
         if !status.is_success() {
             let error_body = response.text().await.unwrap_or_default();
-            anyhow::bail!("Failed to update recipe {}: {} - {}", id, status, error_body);
+            anyhow::bail!(
+                "Failed to update recipe {}: {} - {}",
+                id,
+                status,
+                error_body
+            );
         }
 
         let recipe = response.json().await?;
@@ -980,7 +981,10 @@ impl TandoorClient {
         Ok(())
     }
 
-    pub async fn get_recipe_books(&self, query: Option<&str>) -> Result<PaginatedResponse<RecipeBook>> {
+    pub async fn get_recipe_books(
+        &self,
+        query: Option<&str>,
+    ) -> Result<PaginatedResponse<RecipeBook>> {
         let auth_header = self.get_auth_header()?;
         let mut url = format!("{}/api/recipe-book/", self.base_url);
         if let Some(q) = query {
@@ -1067,7 +1071,10 @@ impl TandoorClient {
         Ok(entries)
     }
 
-    pub async fn add_to_recipe_book(&self, request: CreateRecipeBookEntryRequest) -> Result<RecipeBookEntry> {
+    pub async fn add_to_recipe_book(
+        &self,
+        request: CreateRecipeBookEntryRequest,
+    ) -> Result<RecipeBookEntry> {
         let auth_header = self.get_auth_header()?;
         let url = format!("{}/api/recipe-book-entry/", self.base_url);
 

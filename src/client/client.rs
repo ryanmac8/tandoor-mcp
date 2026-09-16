@@ -645,6 +645,32 @@ impl TandoorClient {
         Ok(meal_plan)
     }
 
+    pub async fn update_meal_plan(
+        &self,
+        plan_id: i32,
+        body: serde_json::Value,
+    ) -> Result<MealPlan> {
+        let auth_header = self.get_auth_header()?;
+        let url = format!("{}/api/meal-plan/{}/", self.base_url, plan_id);
+
+        let response = self
+            .client
+            .patch(&url)
+            .header("Authorization", auth_header)
+            .json(&body)
+            .send()
+            .await?;
+
+        let status = response.status();
+        if !status.is_success() {
+            let error_body = response.text().await.unwrap_or_default();
+            anyhow::bail!("Failed to update meal plan {plan_id}: {status} - {error_body}");
+        }
+
+        let meal_plan = response.json().await?;
+        Ok(meal_plan)
+    }
+
     pub async fn delete_meal_plan(&self, plan_id: i32) -> Result<()> {
         let auth_header = self.get_auth_header()?;
         let url = format!("{}/api/meal-plan/{}/", self.base_url, plan_id);
@@ -989,6 +1015,28 @@ impl TandoorClient {
         if !status.is_success() {
             let error_body = response.text().await.unwrap_or_default();
             anyhow::bail!("Failed to create recipe book: {} - {}", status, error_body);
+        }
+        let book = response.json().await?;
+        Ok(book)
+    }
+
+    pub async fn update_recipe_book(&self, id: i32, body: serde_json::Value) -> Result<RecipeBook> {
+        let auth_header = self.get_auth_header()?;
+        let url = format!("{}/api/recipe-book/{}/", self.base_url, id);
+
+        let response = self
+            .client
+            .patch(&url)
+            .header("Authorization", auth_header)
+            .json(&body)
+            .send()
+            .await
+            .map_err(|e| anyhow::anyhow!("Failed to connect to Tandoor API: {e}"))?;
+
+        let status = response.status();
+        if !status.is_success() {
+            let error_body = response.text().await.unwrap_or_default();
+            anyhow::bail!("Failed to update recipe book {id}: {status} - {error_body}");
         }
         let book = response.json().await?;
         Ok(book)

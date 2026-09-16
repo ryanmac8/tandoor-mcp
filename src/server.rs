@@ -70,8 +70,12 @@ pub struct CreateRecipeParams {
     pub name: String,
     #[serde(default)]
     pub description: Option<String>,
+    /// Legacy single-step fallback. Produces one step with no ingredients — prefer `steps`.
     #[serde(default)]
     pub instructions: Option<String>,
+    /// Structured recipe steps with ingredients. Takes precedence over `instructions` when both are given.
+    #[serde(default)]
+    pub steps: Option<Vec<RecipeStepInput>>,
     #[serde(default)]
     pub servings: Option<i32>,
     #[serde(default)]
@@ -80,6 +84,95 @@ pub struct CreateRecipeParams {
     pub cook_time: Option<i32>,
     #[serde(default)]
     pub keywords: Option<Vec<String>>,
+}
+
+#[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
+pub struct RecipeStepInput {
+    /// Instruction text for this step
+    pub instruction: String,
+    /// Optional step title
+    #[serde(default)]
+    pub name: Option<String>,
+    /// Ingredients used in this step
+    #[serde(default)]
+    pub ingredients: Option<Vec<RecipeStepIngredientInput>>,
+    /// Time for this step in minutes
+    #[serde(default)]
+    pub time: Option<i32>,
+}
+
+#[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
+pub struct RecipeStepIngredientInput {
+    /// Ingredient name. Reuses an existing Tandoor food with this name, or creates a new one.
+    pub food: String,
+    /// Unit name (e.g. "cup", "g"). Reuses an existing unit or creates a new one. Omit for unitless ingredients.
+    #[serde(default)]
+    pub unit: Option<String>,
+    /// Quantity of the ingredient
+    pub amount: f64,
+    /// Optional free-text note (e.g. "finely chopped")
+    #[serde(default)]
+    pub note: Option<String>,
+}
+
+/// Converts step/ingredient input from tool params into the nested request shape
+/// Tandoor's recipe endpoint expects, auto-creating foods/units by name.
+/// Resolves a shopping list item reference (entry ID or food-name substring match,
+/// same convention as `check_shopping_items`) to a concrete entry ID.
+async fn resolve_shopping_list_entry_id(
+    client: &TandoorClient,
+    item: &serde_json::Value,
+) -> Result<i32, String> {
+    if let Some(id) = item.as_i64() {
+        return Ok(id as i32);
+    }
+    if let Some(name) = item.as_str() {
+        let list = client
+            .get_shopping_list()
+            .await
+            .map_err(|e| format!("Failed to get shopping list: {e}"))?;
+        return list
+            .results
+            .iter()
+            .find(|e| e.food.name.to_lowercase().contains(&name.to_lowercase()))
+            .map(|e| e.id)
+            .ok_or_else(|| format!("Item '{name}' not found in shopping list"));
+    }
+    Err("Item must be a shopping list entry ID (number) or a food name (string)".to_string())
+}
+
+fn build_step_requests(
+    steps: Vec<RecipeStepInput>,
+) -> Vec<crate::client::types::CreateStepRequest> {
+    steps
+        .into_iter()
+        .enumerate()
+        .map(|(step_idx, step)| crate::client::types::CreateStepRequest {
+            name: step.name,
+            instruction: step.instruction,
+            ingredients: step
+                .ingredients
+                .unwrap_or_default()
+                .into_iter()
+                .enumerate()
+                .map(
+                    |(ing_idx, ing)| crate::client::types::CreateStepIngredientRequest {
+                        food: crate::client::types::CreateFoodRequest { name: ing.food },
+                        unit: ing
+                            .unit
+                            .map(|name| crate::client::types::CreateUnitRequest { name }),
+                        amount: ing.amount.to_string(),
+                        note: ing.note,
+                        order: ing_idx as i32,
+                        is_header: false,
+                        no_amount: false,
+                    },
+                )
+                .collect(),
+            time: step.time,
+            order: step_idx as i32 + 1,
+        })
+        .collect()
 }
 
 #[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
@@ -133,6 +226,23 @@ pub struct CheckShoppingItemsParams {
 }
 
 #[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
+pub struct UpdateShoppingListItemParams {
+    /// Shopping list entry ID or food name to match
+    pub item: serde_json::Value,
+    /// New quantity for the item
+    #[serde(default)]
+    pub amount: Option<f64>,
+    /// New checked/purchased status
+    #[serde(default)]
+    pub checked: Option<bool>,
+}
+
+#[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
+pub struct RemoveFromShoppingListParams {
+    pub items: Vec<serde_json::Value>, // Can be strings (names) or numbers (IDs)
+}
+
+#[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
 pub struct SearchFoodsParams {
     pub query: String,
     #[serde(default)]
@@ -176,6 +286,24 @@ pub struct CreateMealPlanParams {
 #[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
 pub struct DeleteMealPlanParams {
     pub id: i32,
+}
+
+#[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
+pub struct UpdateMealPlanParams {
+    pub id: i32,
+    #[serde(default)]
+    pub recipe_id: Option<i32>,
+    #[serde(default)]
+    pub title: Option<String>,
+    #[serde(default)]
+    pub servings: Option<i32>,
+    /// YYYY-MM-DD format
+    #[serde(default)]
+    pub date: Option<String>,
+    #[serde(default)]
+    pub meal_type: Option<i32>,
+    #[serde(default)]
+    pub note: Option<String>,
 }
 
 #[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
@@ -241,6 +369,11 @@ pub struct UpdateRecipeParams {
     pub source_url: Option<String>,
     #[serde(default)]
     pub source_title: Option<String>,
+    /// Structured recipe steps with ingredients. WARNING: Tandoor treats this as a full
+    /// replacement of the recipe's steps, not a merge — include every step you want to
+    /// keep, not just the ones you're changing.
+    #[serde(default)]
+    pub steps: Option<Vec<RecipeStepInput>>,
 }
 
 #[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
@@ -264,6 +397,15 @@ pub struct CreateRecipeBookParams {
 #[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
 pub struct DeleteRecipeBookParams {
     pub id: i32,
+}
+
+#[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
+pub struct UpdateRecipeBookParams {
+    pub id: i32,
+    #[serde(default)]
+    pub name: Option<String>,
+    #[serde(default)]
+    pub description: Option<String>,
 }
 
 #[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
@@ -661,7 +803,9 @@ impl TandoorMcpServer {
         }
     }
 
-    #[tool(description = "Create a new recipe")]
+    #[tool(
+        description = "Create a new recipe. Use `steps` to add structured steps with real ingredients (food, unit, amount, note) — recommended. `instructions` is a legacy fallback that creates a single step with no ingredients."
+    )]
     async fn create_recipe(
         &self,
         Parameters(params): Parameters<CreateRecipeParams>,
@@ -691,17 +835,18 @@ impl TandoorMcpServer {
             .map(|name| crate::client::types::CreateKeywordRequest { name })
             .collect();
 
-        // Create a basic step from instructions if provided
-        let steps = if let Some(instructions) = params.instructions {
+        let steps = if let Some(step_inputs) = params.steps {
+            build_step_requests(step_inputs)
+        } else if let Some(instructions) = params.instructions {
             vec![crate::client::types::CreateStepRequest {
                 name: None,
                 instruction: instructions,
-                ingredients: vec![], // Empty ingredients for now
+                ingredients: vec![],
                 time: None,
                 order: 1,
             }]
         } else {
-            vec![] // Empty steps array if no instructions
+            vec![]
         };
 
         let request = crate::client::types::CreateRecipeRequest {
@@ -1342,6 +1487,75 @@ impl TandoorMcpServer {
         }
     }
 
+    #[tool(
+        description = "Update fields on an existing meal plan (recipe, title, servings, date, meal_type, note) without deleting and recreating it"
+    )]
+    async fn update_meal_plan(
+        &self,
+        Parameters(params): Parameters<UpdateMealPlanParams>,
+    ) -> Result<CallToolResult, McpError> {
+        let client = match self.ensure_authenticated().await {
+            Ok(c) => c,
+            Err(e) => {
+                return Ok(CallToolResult::error(vec![Content::text(
+                    json!({"error": "Authentication Error", "details": e.to_string()}).to_string(),
+                )]));
+            }
+        };
+
+        let mut body = serde_json::Map::new();
+        if let Some(v) = params.recipe_id {
+            body.insert("recipe".to_string(), json!(v));
+        }
+        if let Some(v) = params.title {
+            body.insert("title".to_string(), json!(v));
+        }
+        if let Some(v) = params.servings {
+            body.insert("servings".to_string(), json!(v));
+        }
+        if let Some(v) = params.date {
+            let date = match chrono::NaiveDate::parse_from_str(&v, "%Y-%m-%d") {
+                Ok(d) => d,
+                Err(e) => {
+                    return Err(McpError::invalid_params(
+                        "Invalid date format",
+                        Some(serde_json::json!({"error": e.to_string()})),
+                    ));
+                }
+            };
+            body.insert("date".to_string(), json!(date));
+        }
+        if let Some(v) = params.meal_type {
+            body.insert("meal_type".to_string(), json!(v));
+        }
+        if let Some(v) = params.note {
+            body.insert("note".to_string(), json!(v));
+        }
+
+        match client
+            .update_meal_plan(params.id, serde_json::Value::Object(body))
+            .await
+        {
+            Ok(meal_plan) => Ok(CallToolResult::success(vec![Content::text(
+                serde_json::to_string_pretty(&json!({
+                    "id": meal_plan.id,
+                    "date": meal_plan.date,
+                    "meal_type": meal_plan.meal_type.name,
+                    "recipe_id": meal_plan.recipe.as_ref().map(|r| r.id),
+                    "recipe_name": meal_plan.recipe.as_ref().map(|r| &r.name),
+                    "title": meal_plan.title,
+                    "servings": meal_plan.servings,
+                    "note": meal_plan.note
+                }))
+                .unwrap(),
+            )])),
+            Err(e) => Ok(CallToolResult::error(vec![Content::text(
+                json!({"error": "Failed to update meal plan", "details": e.to_string()})
+                    .to_string(),
+            )])),
+        }
+    }
+
     #[tool(description = "Delete a meal plan")]
     async fn delete_meal_plan(
         &self,
@@ -1553,6 +1767,97 @@ impl TandoorMcpServer {
             "updated": updated,
             "errors": errors,
             "summary": format!("Checked {} items, {} errors", updated.len(), errors.len())
+        });
+
+        Ok(CallToolResult::success(vec![Content::text(
+            serde_json::to_string_pretty(&result).unwrap(),
+        )]))
+    }
+
+    #[tool(
+        description = "Update a single shopping list item's quantity and/or checked status, without affecting other items"
+    )]
+    async fn update_shopping_list_item(
+        &self,
+        Parameters(params): Parameters<UpdateShoppingListItemParams>,
+    ) -> Result<CallToolResult, McpError> {
+        let client = match self.ensure_authenticated().await {
+            Ok(c) => c,
+            Err(e) => {
+                return Ok(CallToolResult::error(vec![Content::text(
+                    json!({"error": "Authentication Error", "details": e.to_string()}).to_string(),
+                )]));
+            }
+        };
+
+        let entry_id = match resolve_shopping_list_entry_id(&client, &params.item).await {
+            Ok(id) => id,
+            Err(e) => {
+                return Ok(CallToolResult::error(vec![Content::text(
+                    json!({"error": "Item not found", "details": e}).to_string(),
+                )]));
+            }
+        };
+
+        let request = crate::client::types::UpdateShoppingListEntryRequest {
+            checked: params.checked,
+            amount: params.amount,
+        };
+
+        match client.update_shopping_list_entry(entry_id, request).await {
+            Ok(entry) => Ok(CallToolResult::success(vec![Content::text(
+                serde_json::to_string_pretty(&json!({
+                    "id": entry.id,
+                    "food": entry.food.name,
+                    "amount": entry.amount,
+                    "checked": entry.checked
+                }))
+                .unwrap(),
+            )])),
+            Err(e) => Ok(CallToolResult::error(vec![Content::text(
+                json!({"error": "Failed to update shopping list item", "details": e.to_string()})
+                    .to_string(),
+            )])),
+        }
+    }
+
+    #[tool(
+        description = "Remove specific items from the shopping list by ID or name, without checking them off or touching other items"
+    )]
+    async fn remove_from_shopping_list(
+        &self,
+        Parameters(params): Parameters<RemoveFromShoppingListParams>,
+    ) -> Result<CallToolResult, McpError> {
+        let client = match self.ensure_authenticated().await {
+            Ok(c) => c,
+            Err(e) => {
+                return Ok(CallToolResult::error(vec![Content::text(
+                    json!({"error": "Authentication Error", "details": e.to_string()}).to_string(),
+                )]));
+            }
+        };
+
+        let mut removed = Vec::new();
+        let mut errors = Vec::new();
+
+        for item in params.items {
+            match resolve_shopping_list_entry_id(&client, &item).await {
+                Ok(entry_id) => match client.delete_shopping_list_entry(entry_id).await {
+                    Ok(_) => removed.push(json!({ "id": entry_id })),
+                    Err(e) => errors.push(json!({
+                        "item": item,
+                        "error": "Failed to remove item",
+                        "details": e.to_string()
+                    })),
+                },
+                Err(e) => errors.push(json!({ "item": item, "error": e })),
+            }
+        }
+
+        let result = json!({
+            "removed": removed,
+            "errors": errors,
+            "summary": format!("Removed {} items, {} errors", removed.len(), errors.len())
         });
 
         Ok(CallToolResult::success(vec![Content::text(
@@ -2025,7 +2330,7 @@ impl TandoorMcpServer {
     }
 
     #[tool(
-        description = "Update fields on an existing recipe (name, description, keywords, servings, cooking_time, waiting_time, source_url)"
+        description = "Update fields on an existing recipe (name, description, keywords, servings, cooking_time, waiting_time, source_url, source_title, steps). Passing `steps` REPLACES all of the recipe's steps and ingredients — include every step you want to keep, not just the changed ones."
     )]
     async fn update_recipe(
         &self,
@@ -2060,9 +2365,19 @@ impl TandoorMcpServer {
         if let Some(v) = params.source_url {
             body.insert("source_url".to_string(), json!(v));
         }
+        if let Some(v) = params.source_title {
+            body.insert("source_title".to_string(), json!(v));
+        }
         if let Some(kws) = params.keywords {
             let kw_list: Vec<serde_json::Value> = kws.iter().map(|id| json!({"id": id})).collect();
             body.insert("keywords".to_string(), json!(kw_list));
+        }
+        if let Some(step_inputs) = params.steps {
+            let steps = build_step_requests(step_inputs);
+            body.insert(
+                "steps".to_string(),
+                serde_json::to_value(steps).expect("CreateStepRequest always serializes"),
+            );
         }
 
         match client
@@ -2179,6 +2494,45 @@ impl TandoorMcpServer {
             )])),
             Err(e) => Ok(CallToolResult::error(vec![Content::text(
                 json!({"error": "Failed to create recipe book", "details": e.to_string()})
+                    .to_string(),
+            )])),
+        }
+    }
+
+    #[tool(description = "Rename or update the description of a recipe book/collection")]
+    async fn update_recipe_book(
+        &self,
+        Parameters(params): Parameters<UpdateRecipeBookParams>,
+    ) -> Result<CallToolResult, McpError> {
+        let client = match self.ensure_authenticated().await {
+            Ok(c) => c,
+            Err(e) => {
+                return Ok(CallToolResult::error(vec![Content::text(
+                    json!({"error": "Authentication Error", "details": e.to_string()}).to_string(),
+                )]));
+            }
+        };
+
+        let mut body = serde_json::Map::new();
+        if let Some(v) = params.name {
+            body.insert("name".to_string(), json!(v));
+        }
+        if let Some(v) = params.description {
+            body.insert("description".to_string(), json!(v));
+        }
+
+        match client
+            .update_recipe_book(params.id, serde_json::Value::Object(body))
+            .await
+        {
+            Ok(book) => Ok(CallToolResult::success(vec![Content::text(
+                serde_json::to_string_pretty(
+                    &json!({"id": book.id, "name": book.name, "description": book.description}),
+                )
+                .unwrap(),
+            )])),
+            Err(e) => Ok(CallToolResult::error(vec![Content::text(
+                json!({"error": "Failed to update recipe book", "details": e.to_string()})
                     .to_string(),
             )])),
         }
@@ -2558,11 +2912,13 @@ impl ServerHandler for TandoorMcpServer {
                 get_recipe_book_entries, get_supermarkets, get_unit_conversions. \
                 WRITE tools (modify data — confirm intent before calling): create_recipe, \
                 import_recipe_from_url, update_recipe, add_to_shopping_list, \
-                check_shopping_items, clear_shopping_list, update_pantry, create_meal_plan, \
-                log_cooked_recipe, create_recipe_book, add_to_recipe_book, \
+                check_shopping_items, update_shopping_list_item, clear_shopping_list, \
+                update_pantry, create_meal_plan, update_meal_plan, log_cooked_recipe, \
+                create_recipe_book, update_recipe_book, add_to_recipe_book, \
                 add_meal_plan_to_shopping_list. \
                 DESTRUCTIVE tools (permanent delete — always confirm with user first): \
-                delete_recipe, delete_meal_plan, delete_recipe_book, remove_from_recipe_book."
+                delete_recipe, delete_meal_plan, delete_recipe_book, remove_from_recipe_book, \
+                remove_from_shopping_list."
                     .to_string(),
             ),
         }
@@ -2574,5 +2930,67 @@ impl ServerHandler for TandoorMcpServer {
         _context: RequestContext<RoleServer>,
     ) -> Result<InitializeResult, McpError> {
         Ok(self.get_info())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn build_step_requests_orders_steps_from_one_and_ingredients_from_zero() {
+        let steps = vec![
+            RecipeStepInput {
+                instruction: "Chop vegetables".to_string(),
+                name: Some("Prep".to_string()),
+                ingredients: Some(vec![
+                    RecipeStepIngredientInput {
+                        food: "Onion".to_string(),
+                        unit: Some("cup".to_string()),
+                        amount: 1.5,
+                        note: Some("diced".to_string()),
+                    },
+                    RecipeStepIngredientInput {
+                        food: "Garlic".to_string(),
+                        unit: None,
+                        amount: 2.0,
+                        note: None,
+                    },
+                ]),
+                time: Some(10),
+            },
+            RecipeStepInput {
+                instruction: "Cook".to_string(),
+                name: None,
+                ingredients: None,
+                time: None,
+            },
+        ];
+
+        let requests = build_step_requests(steps);
+
+        assert_eq!(requests.len(), 2);
+        assert_eq!(requests[0].order, 1);
+        assert_eq!(requests[1].order, 2);
+        assert!(requests[1].ingredients.is_empty());
+
+        let onion = &requests[0].ingredients[0];
+        assert_eq!(onion.food.name, "Onion");
+        assert_eq!(onion.unit.as_ref().unwrap().name, "cup");
+        assert_eq!(onion.amount, "1.5");
+        assert_eq!(onion.note.as_deref(), Some("diced"));
+        assert_eq!(onion.order, 0);
+        assert!(!onion.is_header);
+        assert!(!onion.no_amount);
+
+        let garlic = &requests[0].ingredients[1];
+        assert_eq!(garlic.food.name, "Garlic");
+        assert!(garlic.unit.is_none());
+        assert_eq!(garlic.order, 1);
+    }
+
+    #[test]
+    fn build_step_requests_empty_input_yields_empty_output() {
+        assert!(build_step_requests(vec![]).is_empty());
     }
 }

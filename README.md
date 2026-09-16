@@ -193,28 +193,46 @@ curl -X POST http://your-tandoor/api-token-auth/ \
 
 ### Recipe Management
 
-- `search_recipes` — Search for recipes with flexible querying
-- `get_recipe_details` — Get comprehensive recipe information with scaled ingredients
-- `create_recipe` — Create a new recipe
+- `search_recipes` — Search for recipes with flexible querying (keywords, foods, cooking time, rating, random)
+- `get_recipe_details` — Get comprehensive recipe information including scaled ingredients
+- `create_recipe` — Create a new recipe. Use `steps` to add structured ingredients (food, unit, amount, note) — the legacy `instructions` field creates a single step with no ingredients
+- `update_recipe` — Update fields on an existing recipe (name, description, keywords, servings, cooking_time, waiting_time, source_url, source_title, steps). Passing `steps` **replaces** all of the recipe's steps and ingredients — include every step you want to keep, not just the changed ones
+- `delete_recipe` — Delete a recipe permanently
 - `import_recipe_from_url` — Import a recipe from an external URL
+
+### Recipe Books
+
+- `get_recipe_books` — List all recipe books/collections, optionally filtered by name
+- `create_recipe_book` — Create a new recipe book/collection
+- `update_recipe_book` — Rename or update the description of a recipe book/collection
+- `delete_recipe_book` — Delete a recipe book/collection by ID
+- `add_to_recipe_book` — Add a recipe to a recipe book
+- `remove_from_recipe_book` — Remove a recipe from a recipe book by entry ID
+- `get_recipe_book_entries` — List which recipes are in which recipe books
 
 ### Shopping Lists
 
 - `add_to_shopping_list` — Add items to shopping list with intelligent consolidation
 - `get_shopping_list` — Get current shopping list organized by store section
 - `check_shopping_items` — Mark shopping list items as checked/purchased
+- `update_shopping_list_item` — Update a single item's quantity and/or checked status by ID or name, without affecting other items
+- `remove_from_shopping_list` — Remove specific items by ID or name, without checking them off or touching other items
 - `clear_shopping_list` — Clear checked items from shopping list and update pantry
+- `add_meal_plan_to_shopping_list` — Add all recipe ingredients from meal plans in a date range to the shopping list
 
 ### Food & Inventory
 
 - `search_foods` — Search for foods/ingredients with fuzzy name matching
 - `update_pantry` — Update pantry inventory status
 - `suggest_from_inventory` — Get recipe suggestions based on current inventory
+- `get_unit_conversions` — List unit conversions, optionally filtered by food ID
+- `get_supermarkets` — List supermarkets/stores configured in Tandoor
 
 ### Meal Planning
 
 - `get_meal_plans` — Get meal plans for a date range
 - `create_meal_plan` — Create a new meal plan
+- `update_meal_plan` — Update fields on an existing meal plan (recipe, title, servings, date, meal_type, note) without deleting and recreating it
 - `delete_meal_plan` — Delete a meal plan
 - `get_meal_types` — Get available meal types
 

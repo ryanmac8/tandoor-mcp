@@ -194,9 +194,9 @@ curl -X POST http://your-tandoor/api-token-auth/ \
 ### Recipe Management
 
 - `search_recipes` — Search for recipes with flexible querying (keywords, foods, cooking time, rating, random)
-- `get_recipe_details` — Get comprehensive recipe information including scaled ingredients
-- `create_recipe` — Create a new recipe. Use `steps` to add structured ingredients (food, unit, amount, note) — the legacy `instructions` field creates a single step with no ingredients
-- `update_recipe` — Update fields on an existing recipe (name, description, keywords, servings, cooking_time, waiting_time, source_url, source_title, steps). Passing `steps` **replaces** all of the recipe's steps and ingredients — include every step you want to keep, not just the changed ones
+- `get_recipe_details` — Get comprehensive recipe information. `steps` lists each step (`step_number`, instruction, time) with the ingredients used in that step; `ingredients` is the full list for the whole recipe, tagged by step. Amounts scale with `servings`
+- `create_recipe` — Create a new recipe. Use `steps` to add structured steps, each with its own ingredients (food, unit, amount, note; omit `amount` for to-taste ingredients) — the legacy `instructions` field creates a single step with no ingredients
+- `update_recipe` — Update an existing recipe; only what you pass changes. Steps (by `step_number` from `get_recipe_details`): `step_updates` edits specific steps and adds/removes/replaces just that step's ingredients, `add_steps` inserts steps (`after_step`), `remove_steps` deletes steps. Keywords: `add_keywords` / `remove_keywords` by name. `replace_all_steps` and `replace_all_keywords` are **full replacements** (old names `steps` / `keywords` still accepted). Returns the resulting steps
 - `delete_recipe` — Delete a recipe permanently
 - `import_recipe_from_url` — Import a recipe from an external URL
 

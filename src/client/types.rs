@@ -433,7 +433,10 @@ pub struct PaginatedResponse<T> {
 #[derive(Debug, Serialize, Deserialize)]
 pub struct CreateRecipeRequest {
     pub name: String,
+    // Tandoor rejects null for these, so omit them when unset
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub description: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub servings: Option<i32>,
     pub working_time: i32,
     pub waiting_time: i32,
@@ -448,9 +451,12 @@ pub struct CreateKeywordRequest {
 
 #[derive(Debug, Serialize, Deserialize)]
 pub struct CreateStepRequest {
+    // Tandoor rejects null for these, so omit them when unset
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub name: Option<String>,
     pub instruction: String,
     pub ingredients: Vec<CreateStepIngredientRequest>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub time: Option<i32>,
     pub order: i32,
 }

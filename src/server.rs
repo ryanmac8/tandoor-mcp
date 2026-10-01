@@ -108,11 +108,294 @@ pub struct RecipeStepIngredientInput {
     /// Unit name (e.g. "cup", "g"). Reuses an existing unit or creates a new one. Omit for unitless ingredients.
     #[serde(default)]
     pub unit: Option<String>,
-    /// Quantity of the ingredient
-    pub amount: f64,
+    /// Quantity of the ingredient. Omit for ingredients without an amount (e.g. "salt to taste").
+    #[serde(default)]
+    pub amount: Option<f64>,
     /// Optional free-text note (e.g. "finely chopped")
     #[serde(default)]
     pub note: Option<String>,
+}
+
+#[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
+pub struct StepUpdateInput {
+    /// Which step to change: its `step_number` from get_recipe_details (1-based, numbered
+    /// as the recipe was before this call)
+    pub step_number: usize,
+    /// New instruction text for this step (replaces the old text)
+    #[serde(default)]
+    pub instruction: Option<String>,
+    /// New step title
+    #[serde(default)]
+    pub name: Option<String>,
+    /// New time for this step in minutes
+    #[serde(default)]
+    pub time: Option<i32>,
+    /// Ingredients to add to this step. Existing ingredients are kept.
+    #[serde(default)]
+    pub add_ingredients: Option<Vec<RecipeStepIngredientInput>>,
+    /// Food names of ingredients to remove from this step (case-insensitive exact match)
+    #[serde(default)]
+    pub remove_ingredients: Option<Vec<String>>,
+    /// Replace ALL of this step's ingredients with this list (other steps are unaffected).
+    /// Cannot be combined with add_ingredients / remove_ingredients.
+    #[serde(default)]
+    pub replace_ingredients: Option<Vec<RecipeStepIngredientInput>>,
+}
+
+#[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
+pub struct AddStepInput {
+    /// Insert after this step_number (0 = at the beginning). Omit to append at the end.
+    #[serde(default)]
+    pub after_step: Option<usize>,
+    #[serde(flatten)]
+    pub step: RecipeStepInput,
+}
+
+fn build_ingredient_request(
+    ing: RecipeStepIngredientInput,
+    order: i32,
+) -> crate::client::types::CreateStepIngredientRequest {
+    crate::client::types::CreateStepIngredientRequest {
+        food: crate::client::types::CreateFoodRequest { name: ing.food },
+        unit: ing
+            .unit
+            .map(|name| crate::client::types::CreateUnitRequest { name }),
+        amount: ing.amount.unwrap_or(0.0).to_string(),
+        note: ing.note,
+        order,
+        is_header: false,
+        no_amount: ing.amount.is_none(),
+    }
+}
+
+/// Targeted step edits resolved against a recipe's current steps.
+#[derive(Debug)]
+pub struct StepPlan {
+    /// PATCH bodies for /api/step/{id}/
+    pub patches: Vec<(i32, serde_json::Value)>,
+    /// New `steps` list for the recipe PATCH when steps are added or removed. Existing
+    /// steps are referenced by ID only, so Tandoor keeps their content.
+    pub steps_body: Option<serde_json::Value>,
+}
+
+/// Validates step_updates / add_steps / remove_steps against the recipe's existing steps
+/// and turns them into API requests. Nothing is sent if any part is invalid.
+pub fn plan_step_changes(
+    existing: &[crate::client::types::Step],
+    updates: Vec<StepUpdateInput>,
+    adds: Vec<AddStepInput>,
+    removes: Vec<usize>,
+) -> Result<StepPlan, String> {
+    let ordered = ordered_steps(existing);
+    let count = ordered.len();
+    let check = |n: usize, what: &str| {
+        if n == 0 || n > count {
+            Err(format!(
+                "{what}: step {n} does not exist (recipe has {count} steps, numbered from 1)"
+            ))
+        } else {
+            Ok(())
+        }
+    };
+
+    for n in &removes {
+        check(*n, "remove_steps")?;
+    }
+    for add in &adds {
+        if let Some(after) = add.after_step {
+            if after > count {
+                return Err(format!(
+                    "add_steps: after_step {after} does not exist (recipe has {count} steps; use 0 for the beginning)"
+                ));
+            }
+        }
+    }
+
+    let mut patches = Vec::new();
+    let mut seen = std::collections::HashSet::new();
+    for update in updates {
+        let n = update.step_number;
+        check(n, "step_updates")?;
+        if !seen.insert(n) {
+            return Err(format!("step_updates: step {n} is listed more than once"));
+        }
+        if removes.contains(&n) {
+            return Err(format!("step {n} is in both step_updates and remove_steps"));
+        }
+        let step = ordered[n - 1];
+
+        let mut body = serde_json::Map::new();
+        if let Some(v) = update.instruction {
+            body.insert("instruction".to_string(), json!(v));
+        }
+        if let Some(v) = update.name {
+            body.insert("name".to_string(), json!(v));
+        }
+        if let Some(v) = update.time {
+            body.insert("time".to_string(), json!(v));
+        }
+
+        let adding = update.add_ingredients.unwrap_or_default();
+        let removing = update.remove_ingredients.unwrap_or_default();
+        if let Some(replacement) = update.replace_ingredients {
+            if !adding.is_empty() || !removing.is_empty() {
+                return Err(format!(
+                    "step {n}: replace_ingredients cannot be combined with add_ingredients/remove_ingredients"
+                ));
+            }
+            let ings: Vec<_> = replacement
+                .into_iter()
+                .enumerate()
+                .map(|(i, ing)| build_ingredient_request(ing, i as i32))
+                .collect();
+            body.insert("ingredients".to_string(), json!(ings));
+        } else if !adding.is_empty() || !removing.is_empty() {
+            let mut kept: Vec<_> = step.ingredients.iter().collect();
+            kept.sort_by_key(|ing| (ing.order, ing.id));
+            for name in &removing {
+                let target = name.trim().to_lowercase();
+                let before = kept.len();
+                kept.retain(|ing| ing.food.name.trim().to_lowercase() != target);
+                if kept.len() == before {
+                    let names: Vec<&str> = step
+                        .ingredients
+                        .iter()
+                        .map(|i| i.food.name.as_str())
+                        .collect();
+                    return Err(format!(
+                        "step {n} has no ingredient '{name}'. Its ingredients are: {names:?}"
+                    ));
+                }
+            }
+            let mut ings: Vec<serde_json::Value> = kept
+                .iter()
+                .enumerate()
+                .map(|(i, ing)| json!({"id": ing.id, "order": i}))
+                .collect();
+            let start = ings.len();
+            ings.extend(
+                adding
+                    .into_iter()
+                    .enumerate()
+                    .map(|(i, ing)| json!(build_ingredient_request(ing, (start + i) as i32))),
+            );
+            body.insert("ingredients".to_string(), json!(ings));
+        }
+
+        if body.is_empty() {
+            return Err(format!("step_updates: step {n} has no changes"));
+        }
+        patches.push((step.id, serde_json::Value::Object(body)));
+    }
+
+    let steps_body = if adds.is_empty() && removes.is_empty() {
+        None
+    } else {
+        let new_steps = |after: Option<usize>, adds: &mut Vec<AddStepInput>| {
+            let (matching, rest): (Vec<_>, Vec<_>) = std::mem::take(adds)
+                .into_iter()
+                .partition(|a| a.after_step == after);
+            *adds = rest;
+            build_step_requests(matching.into_iter().map(|a| a.step).collect())
+                .into_iter()
+                .map(|s| json!(s))
+                .collect::<Vec<_>>()
+        };
+        let mut adds = adds;
+        let mut list = new_steps(Some(0), &mut adds);
+        for (i, step) in ordered.iter().enumerate() {
+            if !removes.contains(&(i + 1)) {
+                list.push(json!({"id": step.id}));
+            }
+            list.extend(new_steps(Some(i + 1), &mut adds));
+        }
+        list.extend(new_steps(None, &mut adds));
+        for (i, step) in list.iter_mut().enumerate() {
+            step["order"] = json!(i + 1);
+        }
+        Some(json!(list))
+    };
+
+    Ok(StepPlan {
+        patches,
+        steps_body,
+    })
+}
+
+/// Builds a recipe's new keyword list from targeted adds/removes. `known` maps lowercase
+/// names of keywords that already exist in Tandoor to their IDs; anything else is sent
+/// by name so Tandoor creates it.
+pub fn plan_keyword_changes(
+    current: &[crate::client::types::Keyword],
+    add: &[String],
+    remove: &[String],
+    known: &std::collections::HashMap<String, i32>,
+) -> Result<serde_json::Value, String> {
+    let lower = |s: &str| s.trim().to_lowercase();
+    let mut kept: Vec<&crate::client::types::Keyword> = current.iter().collect();
+    for name in remove {
+        let before = kept.len();
+        kept.retain(|k| lower(&k.name) != lower(name));
+        if kept.len() == before {
+            let names: Vec<&str> = current.iter().map(|k| k.name.as_str()).collect();
+            return Err(format!(
+                "recipe has no keyword '{name}'. Its keywords are: {names:?}"
+            ));
+        }
+    }
+
+    let mut list: Vec<serde_json::Value> = kept.iter().map(|k| json!({"id": k.id})).collect();
+    let mut have: Vec<String> = kept.iter().map(|k| lower(&k.name)).collect();
+    for name in add {
+        let key = lower(name);
+        if key.is_empty() || have.contains(&key) {
+            continue;
+        }
+        list.push(match known.get(&key) {
+            Some(id) => json!({"id": id}),
+            None => json!({"name": name.trim()}),
+        });
+        have.push(key);
+    }
+    Ok(json!(list))
+}
+
+/// A recipe's steps in display order, so `step_number` (index + 1) is stable between
+/// get_recipe_details and update_recipe.
+fn ordered_steps(steps: &[crate::client::types::Step]) -> Vec<&crate::client::types::Step> {
+    let mut ordered: Vec<_> = steps.iter().collect();
+    ordered.sort_by_key(|s| (s.order, s.id));
+    ordered
+}
+
+fn ingredient_view(ing: &crate::client::types::StepIngredient, scale: f64) -> serde_json::Value {
+    json!({
+        "food": ing.food.name,
+        "amount": if ing.no_amount { None } else { Some(ing.amount * scale) },
+        "unit": ing.unit.as_ref().map(|u| &u.name),
+        "note": ing.note,
+        "is_header": ing.is_header,
+        "no_amount": ing.no_amount
+    })
+}
+
+/// Per-step view: each step with its own ingredients.
+fn steps_view(steps: &[crate::client::types::Step], scale: f64) -> Vec<serde_json::Value> {
+    ordered_steps(steps)
+        .into_iter()
+        .enumerate()
+        .map(|(i, step)| {
+            let mut ings: Vec<_> = step.ingredients.iter().collect();
+            ings.sort_by_key(|ing| (ing.order, ing.id));
+            json!({
+                "step_number": i + 1,
+                "name": step.name,
+                "instruction": step.instruction,
+                "time": step.time,
+                "ingredients": ings.into_iter().map(|ing| ingredient_view(ing, scale)).collect::<Vec<_>>()
+            })
+        })
+        .collect()
 }
 
 /// Converts step/ingredient input from tool params into the nested request shape
@@ -155,19 +438,7 @@ fn build_step_requests(
                 .unwrap_or_default()
                 .into_iter()
                 .enumerate()
-                .map(
-                    |(ing_idx, ing)| crate::client::types::CreateStepIngredientRequest {
-                        food: crate::client::types::CreateFoodRequest { name: ing.food },
-                        unit: ing
-                            .unit
-                            .map(|name| crate::client::types::CreateUnitRequest { name }),
-                        amount: ing.amount.to_string(),
-                        note: ing.note,
-                        order: ing_idx as i32,
-                        is_header: false,
-                        no_amount: false,
-                    },
-                )
+                .map(|(ing_idx, ing)| build_ingredient_request(ing, ing_idx as i32))
                 .collect(),
             time: step.time,
             order: step_idx as i32 + 1,
@@ -409,9 +680,17 @@ pub struct UpdateRecipeParams {
     pub name: Option<String>,
     #[serde(default)]
     pub description: Option<String>,
-    /// List of keyword IDs to assign
+    /// Keyword (tag) names to add. Existing keywords are reused (case-insensitive); new
+    /// ones are created. Other keywords on the recipe are kept.
     #[serde(default)]
-    pub keywords: Option<Vec<i64>>,
+    pub add_keywords: Option<Vec<String>>,
+    /// Keyword (tag) names to remove from the recipe (case-insensitive). Others are kept.
+    #[serde(default)]
+    pub remove_keywords: Option<Vec<String>>,
+    /// FULL REPLACEMENT: keyword IDs that become the recipe's entire keyword list; any
+    /// keyword not listed is removed. To add or remove one, use add_keywords / remove_keywords.
+    #[serde(default, alias = "keywords")]
+    pub replace_all_keywords: Option<Vec<i64>>,
     #[serde(default)]
     pub servings: Option<i64>,
     #[serde(default)]
@@ -422,11 +701,21 @@ pub struct UpdateRecipeParams {
     pub source_url: Option<String>,
     #[serde(default)]
     pub source_title: Option<String>,
-    /// Structured recipe steps with ingredients. WARNING: Tandoor treats this as a full
-    /// replacement of the recipe's steps, not a merge — include every step you want to
-    /// keep, not just the ones you're changing.
+    /// Edit specific existing steps (instruction, name, time, and that step's ingredients).
+    /// Steps not listed are left untouched. Preferred way to change steps.
     #[serde(default)]
-    pub steps: Option<Vec<RecipeStepInput>>,
+    pub step_updates: Option<Vec<StepUpdateInput>>,
+    /// Insert new steps without touching existing ones.
+    #[serde(default)]
+    pub add_steps: Option<Vec<AddStepInput>>,
+    /// step_numbers of steps to delete (with their ingredients).
+    #[serde(default)]
+    pub remove_steps: Option<Vec<usize>>,
+    /// FULL REPLACEMENT: deletes every existing step and ingredient and writes exactly
+    /// this list. Only use to rewrite the whole recipe; to change part of it use
+    /// step_updates / add_steps / remove_steps. Cannot be combined with those.
+    #[serde(default, alias = "steps")]
+    pub replace_all_steps: Option<Vec<RecipeStepInput>>,
 }
 
 #[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
@@ -763,7 +1052,9 @@ impl TandoorMcpServer {
         }
     }
 
-    #[tool(description = "Get comprehensive recipe information including scaled ingredients")]
+    #[tool(
+        description = "Get comprehensive recipe information. `steps` lists each step (step_number, instruction, time) with the ingredients used in that step; `ingredients` is the full ingredient list for the whole recipe, each tagged with its step_number. Amounts are scaled if `servings` is given."
+    )]
     async fn get_recipe_details(
         &self,
         Parameters(params): Parameters<GetRecipeDetailsParams>,
@@ -787,7 +1078,6 @@ impl TandoorMcpServer {
 
         match client.get_recipe(params.id).await {
             Ok(recipe) => {
-                let mut ingredients = Vec::new();
                 let scaling_factor = if let Some(target_servings) = params.servings {
                     if let Some(original_servings) = recipe.servings {
                         target_servings as f64 / original_servings as f64
@@ -798,28 +1088,22 @@ impl TandoorMcpServer {
                     1.0
                 };
 
-                for step in &recipe.steps {
-                    for ingredient in &step.ingredients {
-                        ingredients.push(json!({
-                            "food": ingredient.food.name,
-                            "amount": ingredient.amount * scaling_factor,
-                            "unit": ingredient.unit.as_ref().map(|u| &u.name),
-                            "note": ingredient.note,
-                            "is_header": ingredient.is_header,
-                            "no_amount": ingredient.no_amount
-                        }));
-                    }
-                }
+                let steps = steps_view(&recipe.steps, scaling_factor);
 
-                let instructions: Vec<String> = recipe
-                    .steps
-                    .into_iter()
-                    .map(|step| {
-                        if step.name.is_empty() {
-                            step.instruction
-                        } else {
-                            format!("{}: {}", step.name, step.instruction)
-                        }
+                // Full ingredient list across all steps, each tagged with its step
+                let ingredients: Vec<serde_json::Value> = steps
+                    .iter()
+                    .flat_map(|step| {
+                        let number = step["step_number"].clone();
+                        step["ingredients"]
+                            .as_array()
+                            .cloned()
+                            .unwrap_or_default()
+                            .into_iter()
+                            .map(move |mut ing| {
+                                ing["step_number"] = number.clone();
+                                ing
+                            })
                     })
                     .collect();
 
@@ -827,7 +1111,7 @@ impl TandoorMcpServer {
                     "id": recipe.id,
                     "name": recipe.name,
                     "description": recipe.description,
-                    "instructions": instructions,
+                    "steps": steps,
                     "ingredients": ingredients,
                     "servings": params.servings.unwrap_or(recipe.servings.unwrap_or(1)),
                     "working_time": recipe.working_time,
@@ -857,7 +1141,7 @@ impl TandoorMcpServer {
     }
 
     #[tool(
-        description = "Create a new recipe. Use `steps` to add structured steps with real ingredients (food, unit, amount, note) — recommended. `instructions` is a legacy fallback that creates a single step with no ingredients."
+        description = "Create a new recipe. Use `steps` to add structured steps, each with the ingredients used in that step (food, unit, amount, note; omit amount for to-taste ingredients) — recommended. `instructions` is a legacy fallback that creates a single step with no ingredients."
     )]
     async fn create_recipe(
         &self,
@@ -2419,7 +2703,7 @@ impl TandoorMcpServer {
     }
 
     #[tool(
-        description = "Update fields on an existing recipe (name, description, keywords, servings, cooking_time, waiting_time, source_url, source_title, steps). Passing `steps` REPLACES all of the recipe's steps and ingredients — include every step you want to keep, not just the changed ones."
+        description = "Update an existing recipe. Top-level fields (name, description, servings, cooking_time, waiting_time, source_url, source_title) change only what you pass. Keywords/tags: `add_keywords` / `remove_keywords` (by name) change just those; `replace_all_keywords` is a FULL REPLACEMENT of the keyword list. To edit steps, call get_recipe_details first and refer to steps by their step_number: `step_updates` edits specific steps and their ingredients (add/remove/replace), `add_steps` inserts new steps, `remove_steps` deletes steps; all other steps stay untouched. `replace_all_steps` is a FULL REPLACEMENT that deletes every existing step and ingredient — only use it to rewrite the whole recipe. Returns the recipe's resulting steps so you can verify."
     )]
     async fn update_recipe(
         &self,
@@ -2457,39 +2741,131 @@ impl TandoorMcpServer {
         if let Some(v) = params.source_title {
             body.insert("source_title".to_string(), json!(v));
         }
-        if let Some(kws) = params.keywords {
+        let reject = |message: String| {
+            Ok(CallToolResult::error(vec![Content::text(
+                json!({"error": "Failed to update recipe", "details": message}).to_string(),
+            )]))
+        };
+
+        let updates = params.step_updates.unwrap_or_default();
+        let adds = params.add_steps.unwrap_or_default();
+        let removes = params.remove_steps.unwrap_or_default();
+        let targeted_steps = !updates.is_empty() || !adds.is_empty() || !removes.is_empty();
+        let add_kw = params.add_keywords.unwrap_or_default();
+        let remove_kw = params.remove_keywords.unwrap_or_default();
+        let targeted_keywords = !add_kw.is_empty() || !remove_kw.is_empty();
+
+        if params.replace_all_steps.is_some() && targeted_steps {
+            return reject(
+                "replace_all_steps cannot be combined with step_updates/add_steps/remove_steps"
+                    .to_string(),
+            );
+        }
+        if params.replace_all_keywords.is_some() && targeted_keywords {
+            return reject(
+                "replace_all_keywords cannot be combined with add_keywords/remove_keywords"
+                    .to_string(),
+            );
+        }
+
+        // Targeted edits are resolved against the recipe as it is now
+        let current = if targeted_steps || targeted_keywords {
+            match client.get_recipe(params.id).await {
+                Ok(r) => Some(r),
+                Err(e) => return reject(format!("Failed to load recipe: {e}")),
+            }
+        } else {
+            None
+        };
+
+        if let Some(kws) = params.replace_all_keywords {
             let kw_list: Vec<serde_json::Value> = kws.iter().map(|id| json!({"id": id})).collect();
             body.insert("keywords".to_string(), json!(kw_list));
+        } else if let (true, Some(current)) = (targeted_keywords, &current) {
+            let mut known = std::collections::HashMap::new();
+            for name in &add_kw {
+                let key = name.trim().to_lowercase();
+                match client.search_keywords(name.trim()).await {
+                    Ok(found) => {
+                        if let Some(k) = found
+                            .results
+                            .iter()
+                            .find(|k| k.name.trim().to_lowercase() == key)
+                        {
+                            known.insert(key, k.id);
+                        }
+                    }
+                    Err(e) => return reject(format!("Failed to look up keyword '{name}': {e}")),
+                }
+            }
+            match plan_keyword_changes(&current.keywords, &add_kw, &remove_kw, &known) {
+                Ok(list) => {
+                    body.insert("keywords".to_string(), list);
+                }
+                Err(message) => return reject(message),
+            }
         }
-        if let Some(step_inputs) = params.steps {
+
+        let mut step_patches = Vec::new();
+        if let Some(step_inputs) = params.replace_all_steps {
             let steps = build_step_requests(step_inputs);
             body.insert(
                 "steps".to_string(),
                 serde_json::to_value(steps).expect("CreateStepRequest always serializes"),
             );
+        } else if let (true, Some(current)) = (targeted_steps, &current) {
+            let plan = match plan_step_changes(&current.steps, updates, adds, removes) {
+                Ok(p) => p,
+                Err(message) => return reject(message),
+            };
+            if let Some(steps) = plan.steps_body {
+                body.insert("steps".to_string(), steps);
+            }
+            step_patches = plan.patches;
         }
 
-        match client
+        // Recipe first (it's where validation usually fails), then the per-step patches
+        let mut recipe = match client
             .update_recipe(params.id, serde_json::Value::Object(body))
             .await
         {
-            Ok(recipe) => Ok(CallToolResult::success(vec![Content::text(
-                serde_json::to_string_pretty(&json!({
-                    "id": recipe.id,
-                    "name": recipe.name,
-                    "description": recipe.description,
-                    "servings": recipe.servings,
-                    "working_time": recipe.working_time,
-                    "waiting_time": recipe.waiting_time,
-                    "keywords": recipe.keywords.into_iter().map(|k| k.name).collect::<Vec<_>>(),
-                    "updated": recipe.updated
-                }))
-                .unwrap(),
-            )])),
-            Err(e) => Ok(CallToolResult::error(vec![Content::text(
-                json!({"error": "Failed to update recipe", "details": e.to_string()}).to_string(),
-            )])),
+            Ok(r) => r,
+            Err(e) => {
+                return Ok(CallToolResult::error(vec![Content::text(
+                    json!({"error": "Failed to update recipe", "details": e.to_string()})
+                        .to_string(),
+                )]));
+            }
+        };
+        if !step_patches.is_empty() {
+            let total = step_patches.len();
+            for (applied, (step_id, patch)) in step_patches.into_iter().enumerate() {
+                if let Err(e) = client.update_step(step_id, patch).await {
+                    return reject(format!(
+                        "{e} (recipe fields and {applied} of {total} step updates were applied before this failure)"
+                    ));
+                }
+            }
+            match client.get_recipe(params.id).await {
+                Ok(r) => recipe = r,
+                Err(e) => return reject(format!("Steps updated, but reloading failed: {e}")),
+            }
         }
+
+        Ok(CallToolResult::success(vec![Content::text(
+            serde_json::to_string_pretty(&json!({
+                "id": recipe.id,
+                "name": recipe.name,
+                "description": recipe.description,
+                "servings": recipe.servings,
+                "working_time": recipe.working_time,
+                "waiting_time": recipe.waiting_time,
+                "keywords": recipe.keywords.into_iter().map(|k| k.name).collect::<Vec<_>>(),
+                "steps": steps_view(&recipe.steps, 1.0),
+                "updated": recipe.updated
+            }))
+            .unwrap(),
+        )]))
     }
 
     #[tool(description = "Delete a recipe permanently")]
@@ -3036,13 +3412,13 @@ mod tests {
                     RecipeStepIngredientInput {
                         food: "Onion".to_string(),
                         unit: Some("cup".to_string()),
-                        amount: 1.5,
+                        amount: Some(1.5),
                         note: Some("diced".to_string()),
                     },
                     RecipeStepIngredientInput {
                         food: "Garlic".to_string(),
                         unit: None,
-                        amount: 2.0,
+                        amount: Some(2.0),
                         note: None,
                     },
                 ]),
@@ -3081,5 +3457,151 @@ mod tests {
     #[test]
     fn build_step_requests_empty_input_yields_empty_output() {
         assert!(build_step_requests(vec![]).is_empty());
+    }
+
+    #[test]
+    fn ingredient_without_amount_is_no_amount() {
+        let req = build_ingredient_request(
+            RecipeStepIngredientInput {
+                food: "Salt".to_string(),
+                unit: None,
+                amount: None,
+                note: Some("to taste".to_string()),
+            },
+            0,
+        );
+        assert!(req.no_amount);
+        assert_eq!(req.amount, "0");
+    }
+
+    fn ingredient(id: i32, food: &str, order: i32) -> serde_json::Value {
+        json!({
+            "id": id, "amount": 1.0, "note": null, "order": order, "is_header": false,
+            "no_amount": false, "unit": null,
+            "food": {"id": id, "name": food, "plural_name": null, "description": null,
+                     "recipe": null, "food_onhand": false, "supermarket_category": null,
+                     "inherit_fields": [], "properties": []}
+        })
+    }
+
+    /// Two steps, deliberately listed out of order: step_number 1 is id 10 (order 1),
+    /// step_number 2 is id 20 (order 2).
+    fn sample_steps() -> Vec<crate::client::types::Step> {
+        serde_json::from_value(json!([
+            {"id": 20, "name": "", "instruction": "Bake", "time": null, "order": 2, "file": null,
+             "ingredients": [ingredient(201, "Egg", 0)]},
+            {"id": 10, "name": "", "instruction": "Mix", "time": null, "order": 1, "file": null,
+             "ingredients": [ingredient(102, "Sugar", 1), ingredient(101, "Flour", 0)]}
+        ]))
+        .unwrap()
+    }
+
+    fn update(step_number: usize) -> StepUpdateInput {
+        StepUpdateInput {
+            step_number,
+            instruction: None,
+            name: None,
+            time: None,
+            add_ingredients: None,
+            remove_ingredients: None,
+            replace_ingredients: None,
+        }
+    }
+
+    fn new_step(instruction: &str, after_step: Option<usize>) -> AddStepInput {
+        AddStepInput {
+            after_step,
+            step: RecipeStepInput {
+                instruction: instruction.to_string(),
+                name: None,
+                ingredients: None,
+                time: None,
+            },
+        }
+    }
+
+    #[test]
+    fn step_update_patches_only_the_numbered_step() {
+        let mut u = update(2);
+        u.instruction = Some("Bake at 350F".to_string());
+        let plan = plan_step_changes(&sample_steps(), vec![u], vec![], vec![]).unwrap();
+        assert_eq!(plan.patches.len(), 1);
+        assert_eq!(plan.patches[0].0, 20);
+        assert_eq!(plan.patches[0].1, json!({"instruction": "Bake at 350F"}));
+        assert!(plan.steps_body.is_none());
+    }
+
+    #[test]
+    fn step_update_adds_and_removes_ingredients_by_reference() {
+        let mut u = update(1);
+        u.remove_ingredients = Some(vec!["flour".to_string()]);
+        u.add_ingredients = Some(vec![RecipeStepIngredientInput {
+            food: "Butter".to_string(),
+            unit: Some("g".to_string()),
+            amount: Some(50.0),
+            note: None,
+        }]);
+        let plan = plan_step_changes(&sample_steps(), vec![u], vec![], vec![]).unwrap();
+        let ings = plan.patches[0].1["ingredients"].as_array().unwrap();
+        assert_eq!(ings[0], json!({"id": 102, "order": 0}));
+        assert_eq!(ings[1]["food"]["name"], "Butter");
+        assert_eq!(ings[1]["order"], 1);
+        assert_eq!(ings.len(), 2);
+    }
+
+    #[test]
+    fn step_update_rejects_unknown_ingredient_and_bad_step() {
+        let mut u = update(1);
+        u.remove_ingredients = Some(vec!["Milk".to_string()]);
+        let err = plan_step_changes(&sample_steps(), vec![u], vec![], vec![]).unwrap_err();
+        assert!(err.contains("no ingredient 'Milk'"), "{err}");
+
+        let mut u = update(3);
+        u.instruction = Some("x".to_string());
+        let err = plan_step_changes(&sample_steps(), vec![u], vec![], vec![]).unwrap_err();
+        assert!(err.contains("step 3 does not exist"), "{err}");
+
+        let err = plan_step_changes(&sample_steps(), vec![update(1)], vec![], vec![]).unwrap_err();
+        assert!(err.contains("no changes"), "{err}");
+    }
+
+    #[test]
+    fn keyword_changes_add_and_remove_without_touching_others() {
+        let current: Vec<crate::client::types::Keyword> = serde_json::from_value(json!([
+            {"id": 1, "name": "Dinner"},
+            {"id": 2, "name": "Quick"}
+        ]))
+        .unwrap();
+        let known = std::collections::HashMap::from([("vegetarian".to_string(), 7)]);
+        let add = vec![
+            "vegetarian".to_string(), // existing keyword → by id
+            "Spicy".to_string(),      // new keyword → by name
+            "dinner".to_string(),     // already on recipe → skipped
+        ];
+        let list = plan_keyword_changes(&current, &add, &["QUICK".to_string()], &known).unwrap();
+        assert_eq!(list, json!([{"id": 1}, {"id": 7}, {"name": "Spicy"}]));
+
+        let err = plan_keyword_changes(&current, &[], &["Lunch".to_string()], &known).unwrap_err();
+        assert!(err.contains("no keyword 'Lunch'"), "{err}");
+    }
+
+    #[test]
+    fn add_and_remove_steps_keep_existing_steps_by_id() {
+        let adds = vec![
+            new_step("Preheat", Some(0)),
+            new_step("Rest", Some(1)),
+            new_step("Serve", None),
+        ];
+        let plan = plan_step_changes(&sample_steps(), vec![], adds, vec![2]).unwrap();
+        let steps = plan.steps_body.unwrap();
+        let steps = steps.as_array().unwrap();
+        let summary: Vec<String> = steps
+            .iter()
+            .map(|s| match s.get("id") {
+                Some(id) => format!("id{id}@{}", s["order"]),
+                None => format!("{}@{}", s["instruction"].as_str().unwrap(), s["order"]),
+            })
+            .collect();
+        assert_eq!(summary, ["Preheat@1", "id10@2", "Rest@3", "Serve@4"]);
     }
 }

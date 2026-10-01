@@ -820,6 +820,32 @@ impl TandoorClient {
     }
 
     // Utility operations
+    /// Search keywords by name (Tandoor's fuzzy `query` filter; callers match exactly).
+    pub async fn search_keywords(&self, query: &str) -> Result<PaginatedResponse<Keyword>> {
+        let auth_header = self.get_auth_header()?;
+        let url = format!(
+            "{}/api/keyword/?query={}&page_size=25",
+            self.base_url,
+            urlencoding::encode(query)
+        );
+
+        let response = self
+            .client
+            .get(&url)
+            .header("Authorization", auth_header)
+            .send()
+            .await
+            .map_err(|e| anyhow::anyhow!("Failed to connect to Tandoor API: {}", e))?;
+
+        let status = response.status();
+        if !status.is_success() {
+            let error_body = response.text().await.unwrap_or_default();
+            anyhow::bail!("Failed to search keywords: {} - {}", status, error_body);
+        }
+        let keywords = response.json().await?;
+        Ok(keywords)
+    }
+
     pub async fn get_keywords(&self) -> Result<PaginatedResponse<Keyword>> {
         let auth_header = self.get_auth_header()?;
         let url = format!("{}/api/keyword/", self.base_url);
@@ -949,6 +975,31 @@ impl TandoorClient {
             .await
             .map_err(|e| anyhow::anyhow!("Invalid response from recipe import endpoint: {}", e))?;
         Ok(result)
+    }
+
+    /// Patch a single recipe step. Only the fields in `body` change; passing `ingredients`
+    /// replaces this step's ingredients without touching other steps.
+    pub async fn update_step(&self, id: i32, body: serde_json::Value) -> Result<Step> {
+        let auth_header = self.get_auth_header()?;
+        let url = format!("{}/api/step/{}/", self.base_url, id);
+
+        let response = self
+            .client
+            .patch(&url)
+            .header("Authorization", auth_header)
+            .json(&body)
+            .send()
+            .await
+            .map_err(|e| anyhow::anyhow!("Failed to connect to Tandoor API: {}", e))?;
+
+        let status = response.status();
+        if !status.is_success() {
+            let error_body = response.text().await.unwrap_or_default();
+            anyhow::bail!("Failed to update step {}: {} - {}", id, status, error_body);
+        }
+
+        let step = response.json().await?;
+        Ok(step)
     }
 
     pub async fn update_recipe(&self, id: i32, body: serde_json::Value) -> Result<Recipe> {

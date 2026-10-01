@@ -370,6 +370,110 @@ impl TandoorClient {
         Ok(food)
     }
 
+    pub async fn get_food(&self, id: i32) -> Result<Food> {
+        let auth_header = self.get_auth_header()?;
+        let url = format!("{}/api/food/{}/", self.base_url, id);
+
+        let response = self
+            .client
+            .get(&url)
+            .header("Authorization", auth_header)
+            .send()
+            .await
+            .map_err(|e| anyhow::anyhow!("Failed to connect to Tandoor API: {}", e))?;
+
+        let status = response.status();
+        if !status.is_success() {
+            let error_body = response.text().await.unwrap_or_default();
+            anyhow::bail!("Failed to get food {}: {} - {}", id, status, error_body);
+        }
+        let food = response.json().await?;
+        Ok(food)
+    }
+
+    /// Every food in the space, following pagination.
+    pub async fn list_all_foods(&self) -> Result<Vec<Food>> {
+        let auth_header = self.get_auth_header()?;
+        let mut url = Some(format!("{}/api/food/?page_size=100", self.base_url));
+        let mut foods = Vec::new();
+
+        while let Some(page_url) = url {
+            let response = self
+                .client
+                .get(&page_url)
+                .header("Authorization", &auth_header)
+                .send()
+                .await
+                .map_err(|e| anyhow::anyhow!("Failed to connect to Tandoor API: {}", e))?;
+
+            let status = response.status();
+            if !status.is_success() {
+                let error_body = response.text().await.unwrap_or_default();
+                anyhow::bail!("Failed to list foods: {} - {}", status, error_body);
+            }
+            let page: PaginatedResponse<Food> = response.json().await?;
+            foods.extend(page.results);
+            url = page.next;
+        }
+        Ok(foods)
+    }
+
+    /// Merge `source` into `target`: every recipe, shopping entry, etc. that used the
+    /// source food is moved to the target, and the source food is deleted.
+    pub async fn merge_food(&self, source: i32, target: i32) -> Result<()> {
+        let auth_header = self.get_auth_header()?;
+        let url = format!("{}/api/food/{}/merge/{}/", self.base_url, source, target);
+
+        let response = self
+            .client
+            .put(&url)
+            .header("Authorization", auth_header)
+            .send()
+            .await
+            .map_err(|e| anyhow::anyhow!("Failed to connect to Tandoor API: {}", e))?;
+
+        let status = response.status();
+        if !status.is_success() {
+            let error_body = response.text().await.unwrap_or_default();
+            anyhow::bail!("Failed to merge foods: {} - {}", status, error_body);
+        }
+        Ok(())
+    }
+
+    /// Add a recipe to the shopping list through Tandoor's recipe shopping endpoint, so
+    /// entries are linked to the recipe and scaled to `servings`. Only the given
+    /// ingredient IDs are added (must be non-empty: an empty list adds everything).
+    pub async fn add_recipe_to_shopping_list(
+        &self,
+        recipe_id: i32,
+        servings: i32,
+        ingredient_ids: &[i32],
+    ) -> Result<()> {
+        anyhow::ensure!(!ingredient_ids.is_empty(), "No ingredients to add");
+        let auth_header = self.get_auth_header()?;
+        let url = format!("{}/api/recipe/{}/shopping/", self.base_url, recipe_id);
+
+        let response = self
+            .client
+            .put(&url)
+            .header("Authorization", auth_header)
+            .json(&serde_json::json!({"servings": servings, "ingredients": ingredient_ids}))
+            .send()
+            .await
+            .map_err(|e| anyhow::anyhow!("Failed to connect to Tandoor API: {}", e))?;
+
+        let status = response.status();
+        if !status.is_success() {
+            let error_body = response.text().await.unwrap_or_default();
+            anyhow::bail!(
+                "Failed to add recipe to shopping list: {} - {}",
+                status,
+                error_body
+            );
+        }
+        Ok(())
+    }
+
     pub async fn update_food_availability(&self, food_id: i32, available: bool) -> Result<Food> {
         let auth_header = self.get_auth_header()?;
         let url = format!("{}/api/food/{}/", self.base_url, food_id);

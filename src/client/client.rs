@@ -346,6 +346,30 @@ impl TandoorClient {
         Ok(foods)
     }
 
+    /// Create a food. Tandoor returns the existing food unchanged if one with the same
+    /// name or plural name already exists, so callers should verify `food_onhand`.
+    pub async fn create_food(&self, request: NewFoodRequest) -> Result<Food> {
+        let auth_header = self.get_auth_header()?;
+        let url = format!("{}/api/food/", self.base_url);
+
+        let response = self
+            .client
+            .post(&url)
+            .header("Authorization", auth_header)
+            .json(&request)
+            .send()
+            .await
+            .map_err(|e| anyhow::anyhow!("Failed to connect to Tandoor API: {}", e))?;
+
+        let status = response.status();
+        if !status.is_success() {
+            let error_body = response.text().await.unwrap_or_default();
+            anyhow::bail!("Failed to create food: {} - {}", status, error_body);
+        }
+        let food = response.json().await?;
+        Ok(food)
+    }
+
     pub async fn update_food_availability(&self, food_id: i32, available: bool) -> Result<Food> {
         let auth_header = self.get_auth_header()?;
         let url = format!("{}/api/food/{}/", self.base_url, food_id);

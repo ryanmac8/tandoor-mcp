@@ -223,7 +223,7 @@ curl -X POST http://your-tandoor/api-token-auth/ \
 ### Food & Inventory
 
 - `search_foods` — Search for foods/ingredients with fuzzy name matching
-- `update_pantry` — Update pantry inventory status
+- `update_pantry` — Mark foods on hand / not on hand. Matches existing foods by exact name or plural (case-insensitive) and creates foods that don't exist yet when marked available (optional `supermarket_category`; disable with `create_missing: false`)
 - `suggest_from_inventory` — Get recipe suggestions based on current inventory
 - `get_unit_conversions` — List unit conversions, optionally filtered by food ID
 - `get_supermarkets` — List supermarkets/stores configured in Tandoor

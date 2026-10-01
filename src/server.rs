@@ -251,15 +251,68 @@ pub struct SearchFoodsParams {
 
 #[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
 pub struct UpdatePantryItem {
+    /// Food name. Matched against existing foods by exact name or plural (case-insensitive).
     pub food: String,
+    /// Whether the food is on hand
     pub available: bool,
     #[serde(default)]
     pub amount: Option<f64>,
+    /// Supermarket category to assign if the food has to be created (e.g. "Produce")
+    #[serde(default)]
+    pub supermarket_category: Option<String>,
 }
 
 #[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
 pub struct UpdatePantryParams {
     pub items: Vec<UpdatePantryItem>,
+    /// Create foods that don't exist yet when marking them available (default true)
+    #[serde(default)]
+    pub create_missing: Option<bool>,
+}
+
+/// Case-insensitive name match that also treats simple "s"/"es" plurals as equal,
+/// so "eggs" finds "Egg" and "tomatoes" finds "Tomato".
+fn food_name_matches(query: &str, food: &crate::client::types::Food) -> bool {
+    let q = query.trim().to_lowercase();
+    let same = |name: &str| {
+        let n = name.trim().to_lowercase();
+        n == q
+            || n == format!("{q}s")
+            || n == format!("{q}es")
+            || q == format!("{n}s")
+            || q == format!("{n}es")
+    };
+    same(&food.name) || food.plural_name.as_deref().is_some_and(same)
+}
+
+/// Look up an existing food by name. Returns the matching food's ID (if any) and up to
+/// five similar food names. Tandoor's search doesn't find "Pepper" for "peppers", so if
+/// the first search has no match, retry with the singular stem.
+async fn find_food_by_name(
+    client: &TandoorClient,
+    name: &str,
+) -> anyhow::Result<(Option<i32>, Vec<String>)> {
+    let name = name.trim();
+    let mut queries = vec![name];
+    if let Some(stem) = name.strip_suffix("es").or_else(|| name.strip_suffix('s')) {
+        if !stem.is_empty() {
+            queries.push(stem);
+        }
+    }
+
+    let mut candidates = Vec::new();
+    for query in queries {
+        let results = client.search_foods(query, Some(25)).await?.results;
+        if let Some(food) = results.iter().find(|f| food_name_matches(name, f)) {
+            return Ok((Some(food.id), candidates));
+        }
+        for food in results {
+            if candidates.len() < 5 && !candidates.contains(&food.name) {
+                candidates.push(food.name);
+            }
+        }
+    }
+    Ok((None, candidates))
 }
 
 #[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
@@ -1951,7 +2004,9 @@ impl TandoorMcpServer {
     }
 
     // Inventory management tools
-    #[tool(description = "Update pantry inventory status")]
+    #[tool(
+        description = "Update pantry inventory status (on hand / not on hand). Foods are matched by exact name or plural (case-insensitive); foods that don't exist yet are created when marked available, unless create_missing is false."
+    )]
     async fn update_pantry(
         &self,
         Parameters(params): Parameters<UpdatePantryParams>,
@@ -1976,37 +2031,71 @@ impl TandoorMcpServer {
         let mut updated = Vec::new();
         let mut errors = Vec::new();
 
+        let create_missing = params.create_missing.unwrap_or(true);
+
         for item in params.items {
-            match client.search_foods(&item.food, Some(1)).await {
-                Ok(foods_response) => {
-                    if let Some(food) = foods_response.results.first() {
-                        match client
-                            .update_food_availability(food.id, item.available)
-                            .await
-                        {
-                            Ok(updated_food) => {
-                                updated.push(json!({
-                                    "id": updated_food.id,
-                                    "name": updated_food.name,
-                                    "available": updated_food.food_onhand,
-                                    "amount": item.amount,
-                                    "status": "updated"
-                                }));
-                            }
-                            Err(e) => {
-                                errors.push(json!({
-                                    "food": item.food,
-                                    "error": "Failed to update availability",
-                                    "details": e.to_string()
-                                }));
-                            }
+            match find_food_by_name(&client, &item.food).await {
+                Ok((existing, candidates)) => {
+                    // Resolve to (food id, created), creating the food if allowed
+                    let resolved = match existing {
+                        Some(id) => Ok((id, false)),
+                        None if item.available && create_missing => {
+                            let request = crate::client::types::NewFoodRequest {
+                                name: item.food.trim().to_string(),
+                                food_onhand: true,
+                                supermarket_category: item.supermarket_category.clone().map(
+                                    |name| crate::client::types::SupermarketCategoryRef { name },
+                                ),
+                            };
+                            client
+                                .create_food(request)
+                                .await
+                                .map(|f| (f.id, true))
+                                .map_err(|e| {
+                                    json!({
+                                        "food": item.food,
+                                        "error": "Failed to create food",
+                                        "details": e.to_string()
+                                    })
+                                })
                         }
-                    } else {
-                        errors.push(json!({
+                        None => Err(json!({
                             "food": item.food,
                             "error": "Food not found",
-                            "suggestion": "Try creating the food first or use a different name"
-                        }));
+                            "similar_foods": candidates,
+                            "suggestion": "Use the exact name of an existing food, or mark it available with create_missing enabled to create it"
+                        })),
+                    };
+
+                    let (food_id, created) = match resolved {
+                        Ok(r) => r,
+                        Err(err) => {
+                            errors.push(err);
+                            continue;
+                        }
+                    };
+
+                    // Always patch: Tandoor's create returns an already-existing food unchanged
+                    match client
+                        .update_food_availability(food_id, item.available)
+                        .await
+                    {
+                        Ok(updated_food) => {
+                            updated.push(json!({
+                                "id": updated_food.id,
+                                "name": updated_food.name,
+                                "available": updated_food.food_onhand,
+                                "amount": item.amount,
+                                "status": if created { "created" } else { "updated" }
+                            }));
+                        }
+                        Err(e) => {
+                            errors.push(json!({
+                                "food": item.food,
+                                "error": "Failed to update availability",
+                                "details": e.to_string()
+                            }));
+                        }
                     }
                 }
                 Err(e) => {

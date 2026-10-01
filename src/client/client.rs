@@ -585,6 +585,102 @@ impl TandoorClient {
         Ok(entry)
     }
 
+    /// Downloads an image for upload to Tandoor. Returns the bytes and a file extension.
+    /// Rejects non-images (checked by content type and file signature) and files over
+    /// MAX_IMAGE_BYTES.
+    pub async fn download_image(&self, url: &str) -> Result<(Vec<u8>, &'static str)> {
+        const MAX_IMAGE_BYTES: usize = 20 * 1024 * 1024;
+        let parsed = reqwest::Url::parse(url).map_err(|e| anyhow::anyhow!("Invalid URL: {e}"))?;
+        anyhow::ensure!(
+            matches!(parsed.scheme(), "http" | "https"),
+            "Only http(s) image URLs are supported"
+        );
+
+        let response = self
+            .client
+            .get(parsed)
+            .header("User-Agent", "Mozilla/5.0 (compatible; tandoor-mcp)")
+            .send()
+            .await
+            .map_err(|e| anyhow::anyhow!("Failed to download image: {e}"))?;
+        let status = response.status();
+        anyhow::ensure!(status.is_success(), "Image download failed: {status}");
+        if let Some(len) = response.content_length() {
+            anyhow::ensure!(
+                len as usize <= MAX_IMAGE_BYTES,
+                "Image is too large ({len} bytes; limit {MAX_IMAGE_BYTES})"
+            );
+        }
+        let bytes = response.bytes().await?.to_vec();
+        anyhow::ensure!(
+            bytes.len() <= MAX_IMAGE_BYTES,
+            "Image is too large ({} bytes; limit {MAX_IMAGE_BYTES})",
+            bytes.len()
+        );
+        let extension = image_extension(&bytes).ok_or_else(|| {
+            anyhow::anyhow!("The URL did not return a JPEG, PNG, WebP, or GIF image")
+        })?;
+        Ok((bytes, extension))
+    }
+
+    /// Sets a recipe's photo by uploading the image file. (Tandoor 2.6's own
+    /// `image_url` option crashes, so callers download the image first.)
+    pub async fn upload_recipe_image(
+        &self,
+        recipe_id: i32,
+        bytes: Vec<u8>,
+        extension: &str,
+    ) -> Result<serde_json::Value> {
+        let mime = match extension {
+            "png" => "image/png",
+            "webp" => "image/webp",
+            "gif" => "image/gif",
+            _ => "image/jpeg",
+        };
+        let part = reqwest::multipart::Part::bytes(bytes)
+            .file_name(format!("recipe.{extension}"))
+            .mime_str(mime)?;
+        self.send_recipe_image_form(
+            recipe_id,
+            reqwest::multipart::Form::new().part("image", part),
+        )
+        .await
+    }
+
+    /// Removes a recipe's photo. A form without an `image` field is how Tandoor clears it
+    /// (sending an empty `image` crashes Tandoor 2.6).
+    pub async fn clear_recipe_image(&self, recipe_id: i32) -> Result<()> {
+        self.send_recipe_image_form(
+            recipe_id,
+            reqwest::multipart::Form::new().text("clear", "1"),
+        )
+        .await
+        .map(|_| ())
+    }
+
+    async fn send_recipe_image_form(
+        &self,
+        recipe_id: i32,
+        form: reqwest::multipart::Form,
+    ) -> Result<serde_json::Value> {
+        let auth_header = self.get_auth_header()?;
+        let url = format!("{}/api/recipe/{recipe_id}/image/", self.base_url);
+        let response = self
+            .client
+            .put(&url)
+            .header("Authorization", auth_header)
+            .multipart(form)
+            .send()
+            .await
+            .map_err(|e| anyhow::anyhow!("Failed to connect to Tandoor API: {e}"))?;
+        let status = response.status();
+        if !status.is_success() {
+            let error_body = response.text().await.unwrap_or_default();
+            anyhow::bail!("Failed to update recipe image: {status} - {error_body}");
+        }
+        Ok(response.json().await.unwrap_or(serde_json::Value::Null))
+    }
+
     // Generic JSON helpers for simple resources (shopping lists, supermarkets,
     // categories, ...). `resource` is the API path segment, e.g. "supermarket".
 
@@ -1508,5 +1604,16 @@ impl TandoorClient {
         }
         let conversions = response.json().await?;
         Ok(conversions)
+    }
+}
+
+/// File extension for an image, identified by its signature bytes.
+pub fn image_extension(bytes: &[u8]) -> Option<&'static str> {
+    match bytes {
+        [0xFF, 0xD8, 0xFF, ..] => Some("jpg"),
+        [0x89, b'P', b'N', b'G', ..] => Some("png"),
+        [b'G', b'I', b'F', b'8', ..] => Some("gif"),
+        [b'R', b'I', b'F', b'F', _, _, _, _, b'W', b'E', b'B', b'P', ..] => Some("webp"),
+        _ => None,
     }
 }

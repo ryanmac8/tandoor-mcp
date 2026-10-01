@@ -626,30 +626,6 @@ fn steps_view(steps: &[crate::client::types::Step], scale: f64) -> Vec<serde_jso
 
 /// Converts step/ingredient input from tool params into the nested request shape
 /// Tandoor's recipe endpoint expects, auto-creating foods/units by name.
-/// Resolves a shopping list item reference (entry ID or food-name substring match,
-/// same convention as `check_shopping_items`) to a concrete entry ID.
-async fn resolve_shopping_list_entry_id(
-    client: &TandoorClient,
-    item: &serde_json::Value,
-) -> Result<i32, String> {
-    if let Some(id) = item.as_i64() {
-        return Ok(id as i32);
-    }
-    if let Some(name) = item.as_str() {
-        let list = client
-            .get_shopping_list()
-            .await
-            .map_err(|e| format!("Failed to get shopping list: {e}"))?;
-        return list
-            .results
-            .iter()
-            .find(|e| e.food.name.to_lowercase().contains(&name.to_lowercase()))
-            .map(|e| e.id)
-            .ok_or_else(|| format!("Item '{name}' not found in shopping list"));
-    }
-    Err("Item must be a shopping list entry ID (number) or a food name (string)".to_string())
-}
-
 fn build_step_requests(
     steps: Vec<RecipeStepInput>,
 ) -> Vec<crate::client::types::CreateStepRequest> {
@@ -677,34 +653,49 @@ pub struct ImportRecipeParams {
     pub url: String,
 }
 
+/// Something to buy: plain text like "3 lemons", or a structured object.
+#[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
+#[serde(untagged)]
+pub enum ShoppingItemInput {
+    /// Plain text, e.g. "3 lemons", "2 lb chicken thighs", "milk", "1/2 cup parsley",
+    /// "a dozen eggs", "2 cans of tomatoes"
+    Text(String),
+    Structured(ShoppingItem),
+}
+
 #[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
 pub struct ShoppingItem {
-    pub name: String,
-    #[serde(default = "default_amount")]
-    pub amount: f64,
+    /// Food name, e.g. "lemons"
+    #[serde(alias = "name")]
+    pub food: String,
+    /// How many / how much (omit for just "milk")
+    #[serde(default)]
+    pub amount: Option<f64>,
+    /// Unit name, e.g. "lb", "bag" (omit for a count)
     #[serde(default)]
     pub unit: Option<String>,
 }
 
-fn default_amount() -> f64 {
-    1.0
-}
-
 #[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
 pub struct AddToShoppingListParams {
+    /// What to add, in plain words: ["3 lemons", "2 lb chicken thighs", "milk"].
+    /// Objects like {"food": "lemons", "amount": 3} also work.
+    pub items: Vec<ShoppingItemInput>,
+    /// If the same food (and unit) is already on the list, increase that line instead of
+    /// adding a second one (default true)
     #[serde(default)]
-    pub items: Option<Vec<ShoppingItem>>,
-    #[serde(default)]
-    pub request: Option<String>,
-    #[serde(default)]
-    pub from_recipe: Option<AddFromRecipeParams>,
+    pub merge_with_existing: Option<bool>,
 }
 
-#[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
-pub struct AddFromRecipeParams {
-    pub recipe_id: i32,
-    #[serde(default)]
-    pub servings: Option<i32>,
+/// A shopping list item: the food's name as it appears on the list, or an entry ID
+/// from get_shopping_list.
+#[derive(Debug, Clone, serde::Deserialize, serde::Serialize, schemars::JsonSchema)]
+#[serde(untagged)]
+pub enum ShoppingRef {
+    /// Entry ID from get_shopping_list
+    Id(i64),
+    /// Food name, e.g. "lemons" (case-insensitive; plurals match)
+    Name(String),
 }
 
 #[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
@@ -719,13 +710,14 @@ fn default_format() -> String {
 
 #[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
 pub struct CheckShoppingItemsParams {
-    pub items: Vec<serde_json::Value>, // Can be strings (names) or numbers (IDs)
+    /// Items to act on: food names as they appear on the list (e.g. "lemons") or entry IDs
+    pub items: Vec<ShoppingRef>,
 }
 
 #[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
 pub struct UpdateShoppingListItemParams {
-    /// Shopping list entry ID or food name to match
-    pub item: serde_json::Value,
+    /// The item to change: food name as it appears on the list (e.g. "lemons") or entry ID
+    pub item: ShoppingRef,
     /// New quantity for the item
     #[serde(default)]
     pub amount: Option<f64>,
@@ -736,7 +728,8 @@ pub struct UpdateShoppingListItemParams {
 
 #[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
 pub struct RemoveFromShoppingListParams {
-    pub items: Vec<serde_json::Value>, // Can be strings (names) or numbers (IDs)
+    /// Items to act on: food names as they appear on the list (e.g. "lemons") or entry IDs
+    pub items: Vec<ShoppingRef>,
 }
 
 #[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
@@ -768,6 +761,11 @@ pub struct UpdatePantryParams {
 /// Case-insensitive name match that also treats simple "s"/"es" plurals as equal,
 /// so "eggs" finds "Egg" and "tomatoes" finds "Tomato".
 fn food_name_matches(query: &str, food: &crate::client::types::Food) -> bool {
+    name_matches(query, &food.name, food.plural_name.as_deref())
+}
+
+/// Case-insensitive name match that also treats simple "s"/"es" plurals as equal.
+fn name_matches(query: &str, name: &str, plural_name: Option<&str>) -> bool {
     let q = query.trim().to_lowercase();
     let same = |name: &str| {
         let n = name.trim().to_lowercase();
@@ -777,7 +775,249 @@ fn food_name_matches(query: &str, food: &crate::client::types::Food) -> bool {
             || q == format!("{n}s")
             || q == format!("{n}es")
     };
-    same(&food.name) || food.plural_name.as_deref().is_some_and(same)
+    same(name) || plural_name.is_some_and(same)
+}
+
+/// Common unit spellings, canonical name first. Used to read units out of plain text
+/// and to reuse an existing Tandoor unit ("lbs" → an existing "lb" or "pound").
+const UNIT_ALIASES: &[&[&str]] = &[
+    &["lb", "lbs", "pound", "pounds"],
+    &["oz", "ounce", "ounces"],
+    &["g", "gram", "grams"],
+    &["kg", "kgs", "kilo", "kilos", "kilogram", "kilograms"],
+    &[
+        "ml",
+        "milliliter",
+        "milliliters",
+        "millilitre",
+        "millilitres",
+    ],
+    &["l", "liter", "liters", "litre", "litres"],
+    &["cup", "cups"],
+    &["tbsp", "tbs", "tablespoon", "tablespoons"],
+    &["tsp", "teaspoon", "teaspoons"],
+    &["can", "cans"],
+    &["jar", "jars"],
+    &["bag", "bags"],
+    &["box", "boxes"],
+    &["bunch", "bunches"],
+    &["pack", "packs", "package", "packages", "pkg"],
+    &["bottle", "bottles"],
+    &["head", "heads"],
+    &["clove", "cloves"],
+    &["loaf", "loaves"],
+    &["carton", "cartons"],
+    &["stick", "sticks"],
+    &["pint", "pints"],
+    &["quart", "quarts"],
+    &["gallon", "gallons", "gal"],
+];
+
+fn unit_group(word: &str) -> Option<&'static [&'static str]> {
+    let w = word.trim().trim_end_matches('.').to_lowercase();
+    UNIT_ALIASES
+        .iter()
+        .copied()
+        .find(|g| g.contains(&w.as_str()))
+}
+
+/// Picks the unit name to send: an existing Tandoor unit that means the same thing
+/// (by alias group, name, or plural) if there is one, otherwise the canonical spelling.
+fn resolve_unit_name(unit: &str, existing: &[crate::client::types::Unit]) -> String {
+    let unit = unit.trim();
+    let group = unit_group(unit);
+    let means_same = |name: &str| {
+        let n = name.trim().to_lowercase();
+        n == unit.to_lowercase() || group.is_some_and(|g| g.contains(&n.as_str()))
+    };
+    existing
+        .iter()
+        .find(|u| means_same(&u.name) || u.plural_name.as_deref().is_some_and(means_same))
+        .map(|u| u.name.clone())
+        .unwrap_or_else(|| {
+            group
+                .map(|g| g[0].to_string())
+                .unwrap_or_else(|| unit.to_string())
+        })
+}
+
+#[derive(Debug, PartialEq)]
+pub struct ParsedShoppingItem {
+    pub food: String,
+    pub amount: Option<f64>,
+    pub unit: Option<String>,
+}
+
+fn parse_quantity(word: &str) -> Option<f64> {
+    let w = word.trim().to_lowercase();
+    let vulgar = |c: char| match c {
+        '½' => Some(0.5),
+        '¼' => Some(0.25),
+        '¾' => Some(0.75),
+        '⅓' => Some(1.0 / 3.0),
+        '⅔' => Some(2.0 / 3.0),
+        '⅛' => Some(0.125),
+        _ => None,
+    };
+    let words = [
+        "one", "two", "three", "four", "five", "six", "seven", "eight", "nine", "ten", "eleven",
+        "twelve",
+    ];
+    if w == "a" || w == "an" {
+        return Some(1.0);
+    }
+    if let Some(i) = words.iter().position(|x| *x == w) {
+        return Some(i as f64 + 1.0);
+    }
+    if let Some((n, d)) = w.split_once('/') {
+        let (n, d) = (n.parse::<f64>().ok()?, d.parse::<f64>().ok()?);
+        return (d != 0.0).then_some(n / d);
+    }
+    // "1½" or "½"
+    if let Some(last) = w.chars().last().and_then(vulgar) {
+        let whole = &w[..w.len() - w.chars().last().unwrap().len_utf8()];
+        return if whole.is_empty() {
+            Some(last)
+        } else {
+            whole.parse::<f64>().ok().map(|n| n + last)
+        };
+    }
+    w.parse::<f64>().ok().filter(|n| n.is_finite() && *n > 0.0)
+}
+
+/// Reads "3 lemons", "2 lb chicken thighs", "1 1/2 cups flour", "a dozen eggs",
+/// "2 cans of tomatoes", "lemons x3", or just "milk" into food / amount / unit.
+/// `extra_units` are unit names that exist in Tandoor beyond the built-in aliases.
+pub fn parse_shopping_text(text: &str, extra_units: &[String]) -> ParsedShoppingItem {
+    let text = text.trim().trim_end_matches(['.', ',', ';']).trim();
+    let mut words: Vec<&str> = text.split_whitespace().collect();
+    let plain = || ParsedShoppingItem {
+        food: text.to_string(),
+        amount: None,
+        unit: None,
+    };
+
+    // Trailing "x3" / "x 3" / "×3"
+    let mut amount = None;
+    if words.len() >= 2 {
+        let last = words[words.len() - 1].to_lowercase();
+        let tail = last.strip_prefix('x').or_else(|| last.strip_prefix('×'));
+        if let Some(n) = tail.filter(|t| !t.is_empty()).and_then(parse_quantity) {
+            amount = Some(n);
+            words.pop();
+        } else if words.len() >= 3
+            && (words[words.len() - 2] == "x" || words[words.len() - 2] == "×")
+        {
+            if let Some(n) = parse_quantity(&last) {
+                amount = Some(n);
+                words.truncate(words.len() - 2);
+            }
+        }
+    }
+
+    // Leading quantity, including mixed numbers like "1 1/2"
+    let mut i = 0;
+    if amount.is_none() {
+        if let Some(n) = words.first().and_then(|w| parse_quantity(w)) {
+            amount = Some(n);
+            i = 1;
+            if let Some(frac) = words
+                .get(1)
+                .filter(|w| w.contains('/') || w.chars().any(|c| "½¼¾⅓⅔⅛".contains(c)))
+                .and_then(|w| parse_quantity(w))
+            {
+                if frac < 1.0 {
+                    amount = Some(n + frac);
+                    i = 2;
+                }
+            }
+        }
+    }
+
+    let mut unit = None;
+    if amount.is_some() && words.len() > i + 1 {
+        let word = words[i].to_lowercase();
+        if word == "dozen" {
+            amount = amount.map(|n| n * 12.0);
+            i += 1;
+        } else if unit_group(&word).is_some()
+            || extra_units.iter().any(|u| u.to_lowercase() == word)
+        {
+            unit = Some(words[i].trim_end_matches('.').to_string());
+            i += 1;
+        }
+        if words.len() > i + 1 && words[i].eq_ignore_ascii_case("of") {
+            i += 1;
+        }
+    }
+
+    let food = words[i..].join(" ");
+    if food.is_empty() {
+        return plain();
+    }
+    ParsedShoppingItem { food, amount, unit }
+}
+
+/// Which shopping list entries a reference points to: an entry ID, or a food name
+/// matched exactly (case-insensitive, simple plurals), falling back to a partial match
+/// only when it is unambiguous. A leading amount in the name ("3 lemons") is ignored.
+fn match_shopping_entries<'a>(
+    entries: &'a [crate::client::types::ShoppingListEntry],
+    item: &ShoppingRef,
+) -> Result<Vec<&'a crate::client::types::ShoppingListEntry>, String> {
+    let name = match item {
+        ShoppingRef::Id(id) => {
+            return entries
+                .iter()
+                .find(|e| e.id as i64 == *id)
+                .map(|e| vec![e])
+                .ok_or_else(|| format!("No shopping list entry with ID {id}"));
+        }
+        ShoppingRef::Name(name) => parse_shopping_text(name, &[]).food,
+    };
+
+    let exact: Vec<_> = entries
+        .iter()
+        .filter(|e| name_matches(&name, &e.food.name, e.food.plural_name.as_deref()))
+        .collect();
+    if !exact.is_empty() {
+        return Ok(exact);
+    }
+
+    let lower = name.trim().to_lowercase();
+    let partial: Vec<_> = entries
+        .iter()
+        .filter(|e| e.food.name.to_lowercase().contains(&lower))
+        .collect();
+    let mut foods: Vec<&str> = partial.iter().map(|e| e.food.name.as_str()).collect();
+    foods.sort_unstable();
+    foods.dedup();
+    match foods.len() {
+        0 => Err(format!("'{name}' is not on the shopping list")),
+        1 => Ok(partial),
+        _ => Err(format!(
+            "'{name}' matches several items: {foods:?}. Use the exact name or the entry ID"
+        )),
+    }
+}
+
+/// Merge target for a new item: an unchecked, manually added (not recipe-linked) entry
+/// for the same food with the same unit.
+fn find_mergeable_entry<'a>(
+    entries: &'a [crate::client::types::ShoppingListEntry],
+    food_id: i32,
+    unit: Option<&str>,
+) -> Option<&'a crate::client::types::ShoppingListEntry> {
+    entries.iter().find(|e| {
+        !e.checked
+            && e.list_recipe.is_none()
+            && e.food.id == food_id
+            && match (e.unit.as_ref(), unit) {
+                (None, None) => true,
+                (Some(u), Some(name)) => u.name.eq_ignore_ascii_case(name),
+                _ => false,
+            }
+    })
 }
 
 /// Look up an existing food by name. Returns the matching food's ID (if any) and up to
@@ -1586,112 +1826,157 @@ impl TandoorMcpServer {
     }
 
     // Shopping list tools
-    #[tool(description = "Add items to shopping list with intelligent consolidation")]
+    #[tool(
+        description = "Add items to the shopping list in plain words, e.g. items: [\"3 lemons\", \"2 lb chicken thighs\", \"milk\", \"1/2 cup parsley\", \"a dozen eggs\"]. Amount and unit are read from the text; foods are matched by name (plurals included) and created if new. If the same food and unit is already on the list it increases that line instead of adding a duplicate (merge_with_existing, default true). For a recipe's ingredients use add_recipe_to_shopping_list."
+    )]
     async fn add_to_shopping_list(
         &self,
         Parameters(params): Parameters<AddToShoppingListParams>,
     ) -> Result<CallToolResult, McpError> {
-        // Ensure we're authenticated before making API calls
         let client = match self.ensure_authenticated().await {
-            Ok(client) => client,
+            Ok(c) => c,
             Err(e) => {
-                tracing::error!("Authentication failed in add_to_shopping_list: {}", e);
-                let error = json!({
-                    "error": "Authentication Error",
-                    "message": "Failed to authenticate with Tandoor",
-                    "details": e.to_string(),
-                    "suggestion": "Check your Tandoor credentials and server connectivity"
-                });
                 return Ok(CallToolResult::error(vec![Content::text(
-                    serde_json::to_string_pretty(&error).unwrap(),
+                    json!({"error": "Authentication Error", "details": e.to_string()}).to_string(),
                 )]));
             }
         };
-
-        if let Some(items) = params.items {
-            let mut requests = Vec::new();
-            let mut added = Vec::new();
-            let mut errors = Vec::new();
-
-            for item in items {
-                match client.search_foods(&item.name, Some(1)).await {
-                    Ok(foods_response) => {
-                        if let Some(food) = foods_response.results.first() {
-                            let request = crate::client::types::CreateShoppingListEntryRequest {
-                                food: food.id,
-                                unit: None,
-                                amount: item.amount,
-                            };
-                            requests.push(request);
-                        } else {
-                            errors.push(json!({
-                                "food": item.name,
-                                "error": "Food not found",
-                                "suggestion": "Try creating the food first or use a different name"
-                            }));
-                        }
-                    }
-                    Err(e) => {
-                        errors.push(json!({
-                            "food": item.name,
-                            "error": "Failed to search for food",
-                            "details": e.to_string()
-                        }));
-                    }
-                }
-            }
-
-            if !requests.is_empty() {
-                match client.add_bulk_to_shopping_list(requests).await {
-                    Ok(entries) => {
-                        for entry in entries {
-                            added.push(json!({
-                                "id": entry.id,
-                                "food": entry.food.name,
-                                "amount": entry.amount,
-                                "unit": entry.unit.as_ref().map(|u| &u.name),
-                                "status": "added"
-                            }));
-                        }
-                    }
-                    Err(e) => {
-                        errors.push(json!({
-                            "error": "Failed to add items to shopping list",
-                            "details": e.to_string()
-                        }));
-                    }
-                }
-            }
-
-            let result = json!({
-                "added": added,
-                "errors": errors,
-                "summary": format!("Added {} items, {} errors", added.len(), errors.len())
-            });
-
-            Ok(CallToolResult::success(vec![Content::text(
-                serde_json::to_string_pretty(&result).unwrap(),
-            )]))
-        } else if let Some(request_text) = params.request {
-            let result = json!({
-                "message": "Natural language processing not yet implemented",
-                "request": request_text,
-                "suggestion": "Please use the structured 'items' parameter with an array of {name, amount} objects"
-            });
-
-            Ok(CallToolResult::success(vec![Content::text(
-                serde_json::to_string_pretty(&result).unwrap(),
-            )]))
-        } else {
-            let error = json!({
-                "error": "Missing required parameters",
-                "message": "Please provide either 'items' array or 'request' text"
-            });
-
+        let fail = |message: String| {
             Ok(CallToolResult::error(vec![Content::text(
-                error.to_string(),
+                json!({"error": "Failed to add to shopping list", "details": message}).to_string(),
             )]))
+        };
+        if params.items.is_empty() {
+            return fail("items is empty".to_string());
         }
+        let merge = params.merge_with_existing.unwrap_or(true);
+
+        let units = match client.get_units().await {
+            Ok(u) => u.results,
+            Err(e) => return fail(format!("Failed to load units: {e}")),
+        };
+        let unit_names: Vec<String> = units.iter().map(|u| u.name.clone()).collect();
+        let mut entries = match client.get_all_shopping_entries().await {
+            Ok(e) => e,
+            Err(e) => return fail(e.to_string()),
+        };
+
+        let mut results = Vec::new();
+        let mut errors = Vec::new();
+        for input in params.items {
+            let (label, parsed) = match input {
+                ShoppingItemInput::Text(text) => {
+                    let parsed = parse_shopping_text(&text, &unit_names);
+                    (text, parsed)
+                }
+                ShoppingItemInput::Structured(item) => (
+                    item.food.clone(),
+                    ParsedShoppingItem {
+                        food: item.food.trim().to_string(),
+                        amount: item.amount,
+                        unit: item.unit.filter(|u| !u.trim().is_empty()),
+                    },
+                ),
+            };
+            if parsed.food.is_empty() {
+                errors.push(json!({"item": label, "error": "No food name"}));
+                continue;
+            }
+            if parsed.amount.is_some_and(|a| a <= 0.0) {
+                errors.push(json!({"item": label, "error": "Amount must be positive"}));
+                continue;
+            }
+            let unit = parsed.unit.as_deref().map(|u| resolve_unit_name(u, &units));
+
+            // Existing food (exact name or plural), else create it
+            let (food_id, created_food) = match find_food_by_name(&client, &parsed.food).await {
+                Ok((Some(id), _)) => (id, false),
+                Ok((None, _)) => {
+                    let request = crate::client::types::NewFoodRequest {
+                        name: parsed.food.clone(),
+                        food_onhand: false,
+                        supermarket_category: None,
+                    };
+                    match client.create_food(request).await {
+                        Ok(food) => (food.id, true),
+                        Err(e) => {
+                            errors.push(json!({"item": label, "error": "Failed to create food", "details": e.to_string()}));
+                            continue;
+                        }
+                    }
+                }
+                Err(e) => {
+                    errors.push(json!({"item": label, "error": "Failed to look up food", "details": e.to_string()}));
+                    continue;
+                }
+            };
+
+            let existing = merge
+                .then(|| find_mergeable_entry(&entries, food_id, unit.as_deref()))
+                .flatten();
+            if let Some(entry) = existing {
+                let Some(extra) = parsed.amount else {
+                    results.push(json!({
+                        "id": entry.id,
+                        "food": entry.food.name,
+                        "amount": entry.amount,
+                        "unit": entry.unit.as_ref().map(|u| &u.name),
+                        "status": "already on list"
+                    }));
+                    continue;
+                };
+                let request = crate::client::types::UpdateShoppingListEntryRequest {
+                    checked: Some(false),
+                    amount: Some(entry.amount + extra),
+                };
+                let previous = entry.amount;
+                let entry_id = entry.id;
+                match client.update_shopping_list_entry(entry_id, request).await {
+                    Ok(updated) => {
+                        results.push(json!({
+                            "id": updated.id,
+                            "food": updated.food.name,
+                            "amount": updated.amount,
+                            "unit": updated.unit.as_ref().map(|u| &u.name),
+                            "status": format!("increased from {previous}")
+                        }));
+                        if let Some(slot) = entries.iter_mut().find(|e| e.id == entry_id) {
+                            *slot = updated;
+                        }
+                    }
+                    Err(e) => errors.push(json!({"item": label, "error": "Failed to update existing entry", "details": e.to_string()})),
+                }
+                continue;
+            }
+
+            match client
+                .add_shopping_entry(food_id, unit.as_deref(), parsed.amount.unwrap_or(1.0))
+                .await
+            {
+                Ok(entry) => {
+                    results.push(json!({
+                        "id": entry.id,
+                        "food": entry.food.name,
+                        "amount": entry.amount,
+                        "unit": entry.unit.as_ref().map(|u| &u.name),
+                        "status": if created_food { "added (new food)" } else { "added" }
+                    }));
+                    entries.push(entry);
+                }
+                Err(e) => errors.push(
+                    json!({"item": label, "error": "Failed to add", "details": e.to_string()}),
+                ),
+            }
+        }
+
+        Ok(CallToolResult::success(vec![Content::text(
+            serde_json::to_string_pretty(&json!({
+                "items": results,
+                "errors": errors,
+                "summary": format!("{} items processed, {} errors", results.len(), errors.len())
+            }))
+            .unwrap(),
+        )]))
     }
 
     #[tool(description = "Get current shopping list organized by store section")]
@@ -1716,10 +2001,10 @@ impl TandoorMcpServer {
             }
         };
 
-        match client.get_shopping_list().await {
-            Ok(response) => {
-                let items: Vec<serde_json::Value> = response
-                    .results
+        match client.get_all_shopping_entries().await {
+            Ok(entries) => {
+                let total = entries.len();
+                let items: Vec<serde_json::Value> = entries
                     .into_iter()
                     .map(|entry| {
                         json!({
@@ -1728,7 +2013,8 @@ impl TandoorMcpServer {
                             "amount": entry.amount,
                             "unit": entry.unit.as_ref().map(|u| &u.name),
                             "checked": entry.checked,
-                            "available": entry.food.food_onhand,
+                            "category": entry.food.supermarket_category.as_ref().and_then(|c| c.get("name")).cloned(),
+                            "from_recipe": entry.list_recipe.is_some(),
                             "created": entry.created,
                             "completed": entry.completed
                         })
@@ -1754,13 +2040,13 @@ impl TandoorMcpServer {
                     json!({
                         "unchecked_items": unchecked,
                         "checked_items": checked,
-                        "total_items": response.count,
+                        "total_items": total,
                         "format": "grouped"
                     })
                 } else {
                     json!({
                         "items": items,
-                        "total_items": response.count,
+                        "total_items": total,
                         "format": "flat"
                     })
                 };
@@ -2312,120 +2598,76 @@ impl TandoorMcpServer {
     }
 
     // Shopping list management tools
-    #[tool(description = "Mark shopping list items as checked/purchased")]
+    #[tool(
+        description = "Check off (mark purchased) shopping list items by food name, e.g. items: [\"lemons\", \"milk\"], or by entry ID. Every unchecked line for that food is checked."
+    )]
     async fn check_shopping_items(
         &self,
         Parameters(params): Parameters<CheckShoppingItemsParams>,
     ) -> Result<CallToolResult, McpError> {
-        // Ensure we're authenticated before making API calls
         let client = match self.ensure_authenticated().await {
-            Ok(client) => client,
+            Ok(c) => c,
             Err(e) => {
-                tracing::error!("Authentication failed in check_shopping_items: {}", e);
-                let error = json!({
-                    "error": "Authentication Error",
-                    "message": "Failed to authenticate with Tandoor",
-                    "details": e.to_string(),
-                    "suggestion": "Check your Tandoor credentials and server connectivity"
-                });
                 return Ok(CallToolResult::error(vec![Content::text(
-                    serde_json::to_string_pretty(&error).unwrap(),
+                    json!({"error": "Authentication Error", "details": e.to_string()}).to_string(),
+                )]));
+            }
+        };
+        let entries = match client.get_all_shopping_entries().await {
+            Ok(e) => e,
+            Err(e) => {
+                return Ok(CallToolResult::error(vec![Content::text(
+                    json!({"error": "Failed to get shopping list", "details": e.to_string()})
+                        .to_string(),
                 )]));
             }
         };
 
         let mut updated = Vec::new();
         let mut errors = Vec::new();
-
         for item in params.items {
-            if let Some(item_id) = item.as_i64() {
+            let matched = match match_shopping_entries(&entries, &item) {
+                Ok(m) => m,
+                Err(e) => {
+                    errors.push(json!({"item": item, "error": e}));
+                    continue;
+                }
+            };
+            let unchecked: Vec<_> = matched.iter().filter(|e| !e.checked).collect();
+            if unchecked.is_empty() {
+                errors.push(json!({"item": item, "error": "Already checked off"}));
+                continue;
+            }
+            for entry in unchecked {
                 let request = crate::client::types::UpdateShoppingListEntryRequest {
                     checked: Some(true),
                     amount: None,
                 };
-
-                match client
-                    .update_shopping_list_entry(item_id as i32, request)
-                    .await
-                {
-                    Ok(entry) => {
-                        updated.push(json!({
-                            "id": entry.id,
-                            "food": entry.food.name,
-                            "checked": entry.checked,
-                            "status": "checked"
-                        }));
-                    }
-                    Err(e) => {
-                        errors.push(json!({
-                            "item_id": item_id,
-                            "error": "Failed to update item",
-                            "details": e.to_string()
-                        }));
-                    }
-                }
-            } else if let Some(item_name) = item.as_str() {
-                match client.get_shopping_list().await {
-                    Ok(list_response) => {
-                        if let Some(entry) = list_response.results.iter().find(|e| {
-                            e.food
-                                .name
-                                .to_lowercase()
-                                .contains(&item_name.to_lowercase())
-                        }) {
-                            let request = crate::client::types::UpdateShoppingListEntryRequest {
-                                checked: Some(true),
-                                amount: None,
-                            };
-
-                            match client.update_shopping_list_entry(entry.id, request).await {
-                                Ok(updated_entry) => {
-                                    updated.push(json!({
-                                        "id": updated_entry.id,
-                                        "food": updated_entry.food.name,
-                                        "checked": updated_entry.checked,
-                                        "status": "checked"
-                                    }));
-                                }
-                                Err(e) => {
-                                    errors.push(json!({
-                                        "item_name": item_name,
-                                        "error": "Failed to update item",
-                                        "details": e.to_string()
-                                    }));
-                                }
-                            }
-                        } else {
-                            errors.push(json!({
-                                "item_name": item_name,
-                                "error": "Item not found in shopping list"
-                            }));
-                        }
-                    }
-                    Err(e) => {
-                        errors.push(json!({
-                            "item_name": item_name,
-                            "error": "Failed to get shopping list",
-                            "details": e.to_string()
-                        }));
-                    }
+                match client.update_shopping_list_entry(entry.id, request).await {
+                    Ok(e) => updated.push(json!({
+                        "id": e.id,
+                        "food": e.food.name,
+                        "amount": e.amount,
+                        "unit": e.unit.as_ref().map(|u| &u.name),
+                        "checked": e.checked
+                    })),
+                    Err(e) => errors.push(json!({"item": item, "error": "Failed to update item", "details": e.to_string()})),
                 }
             }
         }
 
-        let result = json!({
-            "updated": updated,
-            "errors": errors,
-            "summary": format!("Checked {} items, {} errors", updated.len(), errors.len())
-        });
-
         Ok(CallToolResult::success(vec![Content::text(
-            serde_json::to_string_pretty(&result).unwrap(),
+            serde_json::to_string_pretty(&json!({
+                "updated": updated,
+                "errors": errors,
+                "summary": format!("Checked {} items, {} errors", updated.len(), errors.len())
+            }))
+            .unwrap(),
         )]))
     }
 
     #[tool(
-        description = "Update a single shopping list item's quantity and/or checked status, without affecting other items"
+        description = "Change one shopping list item's quantity and/or checked status, by food name (e.g. \"lemons\") or entry ID, without affecting other items"
     )]
     async fn update_shopping_list_item(
         &self,
@@ -2439,40 +2681,58 @@ impl TandoorMcpServer {
                 )]));
             }
         };
+        let fail = |error: &str, details: String| {
+            Ok(CallToolResult::error(vec![Content::text(
+                json!({"error": error, "details": details}).to_string(),
+            )]))
+        };
+        if params.amount.is_none() && params.checked.is_none() {
+            return fail(
+                "Nothing to change",
+                "Pass amount and/or checked".to_string(),
+            );
+        }
 
-        let entry_id = match resolve_shopping_list_entry_id(&client, &params.item).await {
-            Ok(id) => id,
-            Err(e) => {
-                return Ok(CallToolResult::error(vec![Content::text(
-                    json!({"error": "Item not found", "details": e}).to_string(),
-                )]));
+        let entries = match client.get_all_shopping_entries().await {
+            Ok(e) => e,
+            Err(e) => return fail("Failed to get shopping list", e.to_string()),
+        };
+        let entry_id = match match_shopping_entries(&entries, &params.item) {
+            Ok(m) if m.len() == 1 => m[0].id,
+            Ok(m) => {
+                let lines: Vec<_> = m
+                    .iter()
+                    .map(|e| json!({"id": e.id, "amount": e.amount, "unit": e.unit.as_ref().map(|u| &u.name), "checked": e.checked}))
+                    .collect();
+                return fail(
+                    "Item is on the list more than once",
+                    format!("Pick one by entry ID: {}", json!(lines)),
+                );
             }
+            Err(e) => return fail("Item not found", e),
         };
 
         let request = crate::client::types::UpdateShoppingListEntryRequest {
             checked: params.checked,
             amount: params.amount,
         };
-
         match client.update_shopping_list_entry(entry_id, request).await {
             Ok(entry) => Ok(CallToolResult::success(vec![Content::text(
                 serde_json::to_string_pretty(&json!({
                     "id": entry.id,
                     "food": entry.food.name,
                     "amount": entry.amount,
+                    "unit": entry.unit.as_ref().map(|u| &u.name),
                     "checked": entry.checked
                 }))
                 .unwrap(),
             )])),
-            Err(e) => Ok(CallToolResult::error(vec![Content::text(
-                json!({"error": "Failed to update shopping list item", "details": e.to_string()})
-                    .to_string(),
-            )])),
+            Err(e) => fail("Failed to update shopping list item", e.to_string()),
         }
     }
 
     #[tool(
-        description = "Remove specific items from the shopping list by ID or name, without checking them off or touching other items"
+        description = "Remove items from the shopping list by food name (e.g. \"lemons\") or entry ID, without checking them off or touching other items. Every line for that food is removed."
     )]
     async fn remove_from_shopping_list(
         &self,
@@ -2486,32 +2746,44 @@ impl TandoorMcpServer {
                 )]));
             }
         };
+        let entries = match client.get_all_shopping_entries().await {
+            Ok(e) => e,
+            Err(e) => {
+                return Ok(CallToolResult::error(vec![Content::text(
+                    json!({"error": "Failed to get shopping list", "details": e.to_string()})
+                        .to_string(),
+                )]));
+            }
+        };
 
         let mut removed = Vec::new();
         let mut errors = Vec::new();
-
         for item in params.items {
-            match resolve_shopping_list_entry_id(&client, &item).await {
-                Ok(entry_id) => match client.delete_shopping_list_entry(entry_id).await {
-                    Ok(_) => removed.push(json!({ "id": entry_id })),
-                    Err(e) => errors.push(json!({
-                        "item": item,
-                        "error": "Failed to remove item",
-                        "details": e.to_string()
-                    })),
-                },
-                Err(e) => errors.push(json!({ "item": item, "error": e })),
+            match match_shopping_entries(&entries, &item) {
+                Ok(matched) => {
+                    for entry in matched {
+                        match client.delete_shopping_list_entry(entry.id).await {
+                            Ok(_) => removed.push(json!({
+                                "id": entry.id,
+                                "food": entry.food.name,
+                                "amount": entry.amount,
+                                "unit": entry.unit.as_ref().map(|u| &u.name)
+                            })),
+                            Err(e) => errors.push(json!({"item": item, "error": "Failed to remove item", "details": e.to_string()})),
+                        }
+                    }
+                }
+                Err(e) => errors.push(json!({"item": item, "error": e})),
             }
         }
 
-        let result = json!({
-            "removed": removed,
-            "errors": errors,
-            "summary": format!("Removed {} items, {} errors", removed.len(), errors.len())
-        });
-
         Ok(CallToolResult::success(vec![Content::text(
-            serde_json::to_string_pretty(&result).unwrap(),
+            serde_json::to_string_pretty(&json!({
+                "removed": removed,
+                "errors": errors,
+                "summary": format!("Removed {} items, {} errors", removed.len(), errors.len())
+            }))
+            .unwrap(),
         )]))
     }
 
@@ -4322,5 +4594,126 @@ mod tests {
             .map(|g| g.iter().map(|f| f.id).collect())
             .collect();
         assert_eq!(ids, vec![vec![1, 2], vec![3, 4], vec![6, 7]]);
+    }
+
+    fn parsed(food: &str, amount: Option<f64>, unit: Option<&str>) -> ParsedShoppingItem {
+        ParsedShoppingItem {
+            food: food.to_string(),
+            amount,
+            unit: unit.map(str::to_string),
+        }
+    }
+
+    #[test]
+    fn parse_shopping_text_reads_amount_unit_and_food() {
+        let p = |t: &str| parse_shopping_text(t, &["bunch".to_string(), "head".to_string()]);
+        assert_eq!(p("3 lemons"), parsed("lemons", Some(3.0), None));
+        assert_eq!(p("milk"), parsed("milk", None, None));
+        assert_eq!(
+            p("2 lb chicken thighs"),
+            parsed("chicken thighs", Some(2.0), Some("lb"))
+        );
+        assert_eq!(
+            p("1 1/2 cups flour"),
+            parsed("flour", Some(1.5), Some("cups"))
+        );
+        assert_eq!(
+            p("1/2 cup parsley"),
+            parsed("parsley", Some(0.5), Some("cup"))
+        );
+        assert_eq!(p("½ lb butter"), parsed("butter", Some(0.5), Some("lb")));
+        assert_eq!(p("a dozen eggs"), parsed("eggs", Some(12.0), None));
+        assert_eq!(
+            p("2 cans of tomatoes"),
+            parsed("tomatoes", Some(2.0), Some("cans"))
+        );
+        assert_eq!(p("lemons x3"), parsed("lemons", Some(3.0), None));
+        assert_eq!(p("two avocados"), parsed("avocados", Some(2.0), None));
+        assert_eq!(
+            p("1.5 kg potatoes."),
+            parsed("potatoes", Some(1.5), Some("kg"))
+        );
+        assert_eq!(
+            p("a head of lettuce"),
+            parsed("lettuce", Some(1.0), Some("head"))
+        );
+        // A unit word with nothing after it is the food, not a unit
+        assert_eq!(p("3 cans"), parsed("cans", Some(3.0), None));
+        // Unit words are only units after an amount
+        assert_eq!(p("can opener"), parsed("can opener", None, None));
+    }
+
+    #[test]
+    fn resolve_unit_name_reuses_existing_units() {
+        let units: Vec<crate::client::types::Unit> = serde_json::from_value(json!([
+            {"id": 1, "name": "pound", "plural_name": "pounds", "description": null, "base_unit": null, "type_": null},
+            {"id": 2, "name": "Bunch", "plural_name": null, "description": null, "base_unit": null, "type_": null}
+        ]))
+        .unwrap();
+        assert_eq!(resolve_unit_name("lbs", &units), "pound");
+        assert_eq!(resolve_unit_name("bunches", &units), "Bunch");
+        assert_eq!(resolve_unit_name("ounces", &units), "oz");
+        assert_eq!(resolve_unit_name("sleeve", &units), "sleeve");
+    }
+
+    fn shopping_entries() -> Vec<crate::client::types::ShoppingListEntry> {
+        let entry = |id: i32, food_id: i32, food: &str, checked: bool, list_recipe: Option<i32>| {
+            json!({
+                "id": id, "amount": 1.0, "checked": checked, "unit": null,
+                "list_recipe": list_recipe,
+                "food": {"id": food_id, "name": food, "plural_name": null}
+            })
+        };
+        serde_json::from_value(json!([
+            entry(1, 10, "Lemon", false, None),
+            entry(2, 10, "Lemon", false, Some(5)),
+            entry(3, 11, "Lemon Juice", false, None),
+            entry(4, 12, "Milk", true, None),
+            entry(5, 13, "Lime Zest", false, None)
+        ]))
+        .unwrap()
+    }
+
+    #[test]
+    fn match_shopping_entries_prefers_exact_and_rejects_ambiguous() {
+        let entries = shopping_entries();
+        let ids = |r: ShoppingRef| -> Result<Vec<i32>, String> {
+            match_shopping_entries(&entries, &r).map(|m| m.iter().map(|e| e.id).collect())
+        };
+        // "lemons" is Lemon (both lines), not Lemon Juice
+        assert_eq!(ids(ShoppingRef::Name("lemons".into())), Ok(vec![1, 2]));
+        assert_eq!(ids(ShoppingRef::Name("3 lemons".into())), Ok(vec![1, 2]));
+        assert_eq!(ids(ShoppingRef::Id(4)), Ok(vec![4]));
+        // Unique partial match is fine; ambiguous one is an error
+        assert_eq!(ids(ShoppingRef::Name("zest".into())), Ok(vec![5]));
+        assert_eq!(ids(ShoppingRef::Name("juice".into())), Ok(vec![3]));
+        assert!(ids(ShoppingRef::Name("L".into()))
+            .unwrap_err()
+            .contains("several"));
+        assert!(ids(ShoppingRef::Name("bread".into()))
+            .unwrap_err()
+            .contains("not on"));
+        assert!(ids(ShoppingRef::Id(99)).is_err());
+    }
+
+    #[test]
+    fn mergeable_entry_skips_recipe_lines_checked_lines_and_other_units() {
+        let entries = shopping_entries();
+        assert_eq!(
+            find_mergeable_entry(&entries, 10, None).map(|e| e.id),
+            Some(1)
+        );
+        assert!(find_mergeable_entry(&entries, 10, Some("bag")).is_none());
+        assert!(find_mergeable_entry(&entries, 12, None).is_none()); // checked
+    }
+
+    #[test]
+    fn shopping_ref_accepts_names_and_ids() {
+        let refs: Vec<ShoppingRef> = serde_json::from_value(json!(["lemons", 42])).unwrap();
+        assert!(matches!(&refs[0], ShoppingRef::Name(n) if n == "lemons"));
+        assert!(matches!(refs[1], ShoppingRef::Id(42)));
+        let items: Vec<ShoppingItemInput> =
+            serde_json::from_value(json!(["3 lemons", {"name": "milk", "amount": 2}])).unwrap();
+        assert!(matches!(&items[1], ShoppingItemInput::Structured(i) if i.food == "milk"));
     }
 }

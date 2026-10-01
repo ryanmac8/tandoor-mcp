@@ -585,6 +585,72 @@ impl TandoorClient {
         Ok(entry)
     }
 
+    /// Every shopping list entry, following pagination.
+    pub async fn get_all_shopping_entries(&self) -> Result<Vec<ShoppingListEntry>> {
+        let auth_header = self.get_auth_header()?;
+        let mut url = Some(format!(
+            "{}/api/shopping-list-entry/?page_size=100",
+            self.base_url
+        ));
+        let mut entries = Vec::new();
+
+        while let Some(page_url) = url {
+            let response = self
+                .client
+                .get(&page_url)
+                .header("Authorization", &auth_header)
+                .send()
+                .await
+                .map_err(|e| anyhow::anyhow!("Failed to connect to Tandoor API: {e}"))?;
+
+            let status = response.status();
+            if !status.is_success() {
+                let error_body = response.text().await.unwrap_or_default();
+                anyhow::bail!("Failed to get shopping list: {status} - {error_body}");
+            }
+            let page: PaginatedResponse<ShoppingListEntry> = response
+                .json()
+                .await
+                .map_err(|e| anyhow::anyhow!("Invalid shopping list response: {e}"))?;
+            entries.extend(page.results);
+            url = page.next;
+        }
+        Ok(entries)
+    }
+
+    /// Add one entry. The unit is given by name; Tandoor reuses or creates it.
+    pub async fn add_shopping_entry(
+        &self,
+        food_id: i32,
+        unit: Option<&str>,
+        amount: f64,
+    ) -> Result<ShoppingListEntry> {
+        let auth_header = self.get_auth_header()?;
+        let url = format!("{}/api/shopping-list-entry/", self.base_url);
+        let body = serde_json::json!({
+            "food": food_id,
+            "unit": unit.map(|name| serde_json::json!({"name": name})),
+            "amount": amount
+        });
+
+        let response = self
+            .client
+            .post(&url)
+            .header("Authorization", auth_header)
+            .json(&body)
+            .send()
+            .await
+            .map_err(|e| anyhow::anyhow!("Failed to connect to Tandoor API: {e}"))?;
+
+        let status = response.status();
+        if !status.is_success() {
+            let error_body = response.text().await.unwrap_or_default();
+            anyhow::bail!("Failed to add to shopping list: {status} - {error_body}");
+        }
+        let entry = response.json().await?;
+        Ok(entry)
+    }
+
     pub async fn add_bulk_to_shopping_list(
         &self,
         entries: Vec<CreateShoppingListEntryRequest>,

@@ -195,8 +195,8 @@ curl -X POST http://your-tandoor/api-token-auth/ \
 
 - `search_recipes` — Search for recipes with flexible querying (keywords, foods, cooking time, rating, random)
 - `get_recipe_details` — Get comprehensive recipe information. `steps` lists each step (`step_number`, instruction, time) with the ingredients used in that step; `ingredients` is the full list for the whole recipe, tagged by step. Amounts scale with `servings`
-- `create_recipe` — Create a new recipe. Use `steps` to add structured steps, each with its own ingredients (food, unit, amount, note; omit `amount` for to-taste ingredients) — the legacy `instructions` field creates a single step with no ingredients
-- `update_recipe` — Update an existing recipe; only what you pass changes. Steps (by `step_number` from `get_recipe_details`): `step_updates` edits specific steps and adds/removes/replaces just that step's ingredients, `add_steps` inserts steps (`after_step`), `remove_steps` deletes steps. Keywords: `add_keywords` / `remove_keywords` by name. `replace_all_steps` and `replace_all_keywords` are **full replacements** (old names `steps` / `keywords` still accepted). Returns the resulting steps
+- `create_recipe` — Create a new recipe. Use `steps` to add structured steps, each with its own ingredients (food, unit, amount, note; omit `amount` for to-taste ingredients; `{"header": "For the sauce"}` adds a section heading) — the legacy `instructions` field creates a single step with no ingredients
+- `update_recipe` — Update an existing recipe; only what you pass changes. Steps (by `step_number` from `get_recipe_details`, numbered as before the call): `step_updates` edits specific steps — instruction/name/time, and that step's ingredients via `add_ingredients`, `remove_ingredients`, `update_ingredients` (change amount/unit/note/food in place) or `replace_ingredients`; `add_steps` inserts steps (`after_step`), `move_steps` reorders, `remove_steps` deletes. Keywords: `add_keywords` / `remove_keywords` by name. `replace_all_steps` and `replace_all_keywords` are **full replacements** (old names `steps` / `keywords` still accepted). Returns the resulting steps
 - `delete_recipe` — Delete a recipe permanently
 - `import_recipe_from_url` — Import a recipe from an external URL
 
@@ -218,12 +218,15 @@ curl -X POST http://your-tandoor/api-token-auth/ \
 - `update_shopping_list_item` — Update a single item's quantity and/or checked status by ID or name, without affecting other items
 - `remove_from_shopping_list` — Remove specific items by ID or name, without checking them off or touching other items
 - `clear_shopping_list` — Clear checked items from shopping list and update pantry
-- `add_meal_plan_to_shopping_list` — Add all recipe ingredients from meal plans in a date range to the shopping list
+- `add_meal_plan_to_shopping_list` — Add all recipe ingredients from meal plans in a date range to the shopping list, skipping foods already on hand (`skip_on_hand: false` to include them)
+- `add_recipe_to_shopping_list` — Add one recipe's ingredients to the shopping list, scaled to `servings` and linked to the recipe, skipping foods already on hand (`include_on_hand: true` to include them)
 
 ### Food & Inventory
 
 - `search_foods` — Search for foods/ingredients with fuzzy name matching
-- `update_pantry` — Mark foods on hand / not on hand. Matches existing foods by exact name or plural (case-insensitive) and creates foods that don't exist yet when marked available (optional `supermarket_category`; disable with `create_missing: false`)
+- `update_pantry` — Mark foods on hand / not on hand (Tandoor tracks on-hand status, not quantities). Matches existing foods by exact name or plural (case-insensitive) and creates foods that don't exist yet when marked available (optional `supermarket_category`; disable with `create_missing: false`)
+- `find_duplicate_foods` — List foods that look like duplicates (same name apart from case, spacing, or a simple plural)
+- `merge_foods` — Merge one food into another by ID; recipes and shopping entries move to the target and the source food is **deleted**
 - `suggest_from_inventory` — Get recipe suggestions based on current inventory
 - `get_unit_conversions` — List unit conversions, optionally filtered by food ID
 - `get_supermarkets` — List supermarkets/stores configured in Tandoor

@@ -14,11 +14,19 @@ WORKDIR /app
 # Copy manifests
 COPY Cargo.toml ./
 
+# Build dependencies against stub sources so this layer stays cached until
+# Cargo.toml changes, instead of recompiling every crate on each source edit
+RUN mkdir src \
+    && echo 'fn main() {}' > src/main.rs \
+    && touch src/lib.rs \
+    && cargo build --release \
+    && rm -rf src
+
 # Copy source code
 COPY src ./src
 
-# Build the application in release mode
-RUN cargo build --release
+# Build the application in release mode (touch so cargo sees the real sources as newer)
+RUN touch src/main.rs src/lib.rs && cargo build --release
 
 # Runtime stage using distroless
 FROM gcr.io/distroless/cc-debian12:latest

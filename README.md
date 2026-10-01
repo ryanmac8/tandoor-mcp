@@ -193,7 +193,7 @@ curl -X POST http://your-tandoor/api-token-auth/ \
 
 ### Recipe Management
 
-- `search_recipes` — Search for recipes with flexible querying (keywords, foods, cooking time, rating, random)
+- `search_recipes` — Search for recipes with flexible querying (keywords, foods, cooking time, rating, random). Each result shows `has_photo`; `has_photo: false` lists recipes missing a photo
 - `get_recipe_details` — Get comprehensive recipe information. `steps` lists each step (`step_number`, instruction, time) with the ingredients used in that step; `ingredients` is the full list for the whole recipe, tagged by step. Amounts scale with `servings`
 - `create_recipe` — Create a new recipe. Use `steps` to add structured steps, each with its own ingredients (food, unit, amount, note; omit `amount` for to-taste ingredients; `{"header": "For the sauce"}` adds a section heading) — the legacy `instructions` field creates a single step with no ingredients
 - `update_recipe` — Update an existing recipe; only what you pass changes. Steps (by `step_number` from `get_recipe_details`, numbered as before the call): `step_updates` edits specific steps — instruction/name/time, and that step's ingredients via `add_ingredients`, `remove_ingredients`, `update_ingredients` (change amount/unit/note/food in place) or `replace_ingredients`; `add_steps` inserts steps (`after_step`), `move_steps` reorders, `remove_steps` deletes. Keywords: `add_keywords` / `remove_keywords` by name. `replace_all_steps` and `replace_all_keywords` are **full replacements** (old names `steps` / `keywords` still accepted). Returns the resulting steps

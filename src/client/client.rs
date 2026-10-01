@@ -99,6 +99,24 @@ impl TandoorClient {
     }
 
     // Recipe operations
+    /// Fetches a further page of recipe search results (a `next` URL from Tandoor).
+    pub async fn get_recipe_page(&self, url: &str) -> Result<PaginatedResponse<Recipe>> {
+        let auth_header = self.get_auth_header()?;
+        let response = self
+            .client
+            .get(url)
+            .header("Authorization", auth_header)
+            .send()
+            .await
+            .map_err(|e| anyhow::anyhow!("Failed to connect to Tandoor API: {e}"))?;
+        let status = response.status();
+        if !status.is_success() {
+            let error_body = response.text().await.unwrap_or_default();
+            anyhow::bail!("Failed to search recipes: {status} - {error_body}");
+        }
+        Ok(response.json().await?)
+    }
+
     #[allow(clippy::too_many_arguments)]
     pub async fn search_recipes(
         &self,

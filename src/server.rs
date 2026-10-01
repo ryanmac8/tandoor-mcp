@@ -56,6 +56,9 @@ pub struct SearchRecipesParams {
     /// Return a random recipe
     #[serde(default)]
     pub random: Option<bool>,
+    /// true = only recipes with a photo, false = only recipes missing a photo
+    #[serde(default)]
+    pub has_photo: Option<bool>,
 }
 
 #[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
@@ -1946,7 +1949,9 @@ impl TandoorMcpServer {
     }
 
     // Recipe tools
-    #[tool(description = "Search for recipes with flexible querying")]
+    #[tool(
+        description = "Search for recipes with flexible querying. Each result has `has_photo`; pass has_photo: false to list recipes missing a photo (e.g. to add photos with set_recipe_image)."
+    )]
     async fn search_recipes(
         &self,
         Parameters(params): Parameters<SearchRecipesParams>,
@@ -1968,18 +1973,49 @@ impl TandoorMcpServer {
             }
         };
 
-        match client
-            .search_recipes(
+        let search = |limit: Option<i32>| {
+            client.search_recipes(
                 params.query.as_deref(),
-                params.limit,
+                limit,
                 params.keywords.as_deref(),
                 params.foods.as_deref(),
                 params.max_cooking_time,
                 params.min_rating,
                 params.random,
             )
-            .await
-        {
+        };
+        let result = match params.has_photo {
+            None => search(params.limit).await,
+            // Tandoor can't filter by photo, so read every matching recipe and filter here
+            Some(want) => {
+                let mut result = search(Some(100)).await;
+                if let Ok(page) = &mut result {
+                    let mut next = page.next.take();
+                    while let Some(url) = next {
+                        match client.get_recipe_page(&url).await {
+                            Ok(more) => {
+                                page.results.extend(more.results);
+                                next = more.next;
+                            }
+                            Err(e) => {
+                                result = Err(e);
+                                break;
+                            }
+                        }
+                    }
+                }
+                result.map(|mut page| {
+                    page.results.retain(|r| r.image.is_some() == want);
+                    page.count = page.results.len() as i32;
+                    if let Some(limit) = params.limit.filter(|l| *l > 0) {
+                        page.results.truncate(limit as usize);
+                    }
+                    page
+                })
+            }
+        };
+
+        match result {
             Ok(response) => {
                 let recipes_json: Vec<serde_json::Value> = response.results
                     .into_iter()
@@ -1989,6 +2025,8 @@ impl TandoorMcpServer {
                             "name": recipe.name,
                             "description": recipe.description,
                             "total_time": recipe.working_time.unwrap_or(0) + recipe.waiting_time.unwrap_or(0),
+                            "has_photo": recipe.image.is_some(),
+                            "image": recipe.image,
                             "servings": recipe.servings,
                             "keywords": recipe.keywords.into_iter().map(|k| k.name).collect::<Vec<String>>(),
                             "rating": recipe.rating,
@@ -2002,9 +2040,10 @@ impl TandoorMcpServer {
                 let result = json!({
                     "recipes": recipes_json,
                     "total_count": response.count,
-                    "search_interpretation": format!("Found {} recipes{}",
+                    "search_interpretation": format!("Found {} recipes{}{}",
                         response.count,
-                        params.query.as_ref().map_or(String::new(), |q| format!(" matching '{q}'"))
+                        params.query.as_ref().map_or(String::new(), |q| format!(" matching '{q}'")),
+                        match params.has_photo { Some(true) => " with a photo", Some(false) => " missing a photo", None => "" }
                     )
                 });
 

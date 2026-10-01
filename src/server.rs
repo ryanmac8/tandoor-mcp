@@ -1597,6 +1597,20 @@ pub struct DeleteRecipeParams {
 }
 
 #[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
+pub struct SetRecipeImageParams {
+    /// Recipe ID
+    pub recipe_id: i32,
+    /// Direct link to a JPEG, PNG, WebP, or GIF image (not a web page that shows one)
+    pub image_url: String,
+}
+
+#[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
+pub struct RemoveRecipeImageParams {
+    /// Recipe ID
+    pub recipe_id: i32,
+}
+
+#[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
 pub struct GetRecipeBooksParams {
     #[serde(default)]
     pub query: Option<String>,
@@ -2076,6 +2090,7 @@ impl TandoorMcpServer {
                     "waiting_time": recipe.waiting_time,
                     "total_time": recipe.working_time.unwrap_or(0) + recipe.waiting_time.unwrap_or(0),
                     "keywords": recipe.keywords.into_iter().map(|k| k.name).collect::<Vec<String>>(),
+                    "image": recipe.image,
                     "nutrition": recipe.nutrition,
                     "created": recipe.created,
                     "updated": recipe.updated,
@@ -3967,6 +3982,62 @@ impl TandoorMcpServer {
         )]))
     }
 
+    #[tool(
+        description = "Set a recipe's photo from an image URL. The URL must point directly at a JPEG, PNG, WebP, or GIF file (not a web page). The server downloads it and uploads it to Tandoor, replacing any existing photo."
+    )]
+    async fn set_recipe_image(
+        &self,
+        Parameters(params): Parameters<SetRecipeImageParams>,
+    ) -> Result<CallToolResult, McpError> {
+        let client = auth_or_return!(self);
+        let recipe = match client.get_recipe(params.recipe_id).await {
+            Ok(r) => r,
+            Err(e) => return tool_err("Recipe not found", e),
+        };
+        let (bytes, extension) = match client.download_image(params.image_url.trim()).await {
+            Ok(d) => d,
+            Err(e) => return tool_err("Could not use that image", e),
+        };
+        let size = bytes.len();
+        if let Err(e) = client
+            .upload_recipe_image(recipe.id, bytes, extension)
+            .await
+        {
+            return tool_err("Failed to upload image", e);
+        }
+        let image = client
+            .get_recipe(recipe.id)
+            .await
+            .ok()
+            .and_then(|r| r.image);
+        tool_ok(json!({
+            "recipe": recipe.name,
+            "image": image,
+            "replaced_previous": recipe.image.is_some(),
+            "format": extension,
+            "bytes": size
+        }))
+    }
+
+    #[tool(description = "Remove a recipe's photo")]
+    async fn remove_recipe_image(
+        &self,
+        Parameters(params): Parameters<RemoveRecipeImageParams>,
+    ) -> Result<CallToolResult, McpError> {
+        let client = auth_or_return!(self);
+        let recipe = match client.get_recipe(params.recipe_id).await {
+            Ok(r) => r,
+            Err(e) => return tool_err("Recipe not found", e),
+        };
+        if recipe.image.is_none() {
+            return tool_ok(json!({"recipe": recipe.name, "message": "Recipe has no photo"}));
+        }
+        match client.clear_recipe_image(recipe.id).await {
+            Ok(()) => tool_ok(json!({"recipe": recipe.name, "message": "Photo removed"})),
+            Err(e) => tool_err("Failed to remove photo", e),
+        }
+    }
+
     #[tool(description = "Delete a recipe permanently")]
     async fn delete_recipe(
         &self,
@@ -5174,7 +5245,8 @@ impl ServerHandler for TandoorMcpServer {
                 add_meal_plan_to_shopping_list, add_recipe_to_shopping_list, \
                 create_shopping_list, update_shopping_list, update_shopping_list_recipe, \
                 create_supermarket, update_supermarket, create_supermarket_category, \
-                update_supermarket_category, set_food_category. \
+                update_supermarket_category, set_food_category, set_recipe_image, \
+                remove_recipe_image. \
                 DESTRUCTIVE tools (permanent delete — always confirm with user first): \
                 delete_recipe, delete_meal_plan, delete_recipe_book, remove_from_recipe_book, \
                 remove_from_shopping_list, merge_foods (deletes the source food), \
@@ -5766,5 +5838,16 @@ mod tests {
         assert_eq!(view["name"], "Lemon Chicken");
         assert_eq!(view["items"].as_array().unwrap().len(), 1);
         assert_eq!(view["items"][0]["food"], "Lemon");
+    }
+
+    #[test]
+    fn image_extension_detects_by_signature() {
+        use crate::client::client::image_extension;
+        assert_eq!(image_extension(&[0xFF, 0xD8, 0xFF, 0xE0, 0]), Some("jpg"));
+        assert_eq!(image_extension(b"\x89PNG\r\n\x1a\n"), Some("png"));
+        assert_eq!(image_extension(b"GIF89a"), Some("gif"));
+        assert_eq!(image_extension(b"RIFF\0\0\0\0WEBPVP8 "), Some("webp"));
+        assert_eq!(image_extension(b"<!doctype html>"), None);
+        assert_eq!(image_extension(b""), None);
     }
 }

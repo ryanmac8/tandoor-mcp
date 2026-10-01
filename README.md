@@ -212,15 +212,31 @@ curl -X POST http://your-tandoor/api-token-auth/ \
 
 ### Shopping Lists
 
-- `add_to_shopping_list` — Add items to shopping list with intelligent consolidation
-- `get_shopping_list` — Get current shopping list organized by store section
-- `check_shopping_items` — Mark shopping list items as checked/purchased
-- `update_shopping_list_item` — Update a single item's quantity and/or checked status by ID or name, without affecting other items
-- `remove_from_shopping_list` — Remove specific items by ID or name, without checking them off or touching other items
-- `clear_shopping_list` — Clear checked items from shopping list and update pantry
-- `add_meal_plan_to_shopping_list` — Add all recipe ingredients from meal plans in a date range to the shopping list, skipping foods already on hand (`skip_on_hand: false` to include them)
-- `add_recipe_to_shopping_list` — Add one recipe's ingredients to the shopping list, scaled to `servings` and linked to the recipe, skipping foods already on hand (`include_on_hand: true` to include them)
+Items are referred to by food name (e.g. `"lemons"`, plurals match) or entry ID; lists, stores, and categories by name or ID.
 
+**Items**
+- `add_to_shopping_list` — Add items in plain words: `["3 lemons", "2 lb chicken thighs", "milk", "a dozen eggs"]`. Units map to existing ones, new foods are created, and an existing line for the same food/unit is increased instead of duplicated. Optional `shopping_list` puts them on a named list
+- `get_shopping_list` — The whole list with each item's category, named lists, and whether it came from a recipe; optional `shopping_list` filter
+- `update_shopping_list_item` — Change one item's amount, unit, food, checked status, or named lists
+- `check_shopping_items` — Check off items by name or ID (`checked: false` unchecks)
+- `remove_from_shopping_list` — Remove items without checking them off
+- `clear_shopping_list` — Clear checked items and mark them on hand in the pantry
+
+**Recipes on the list**
+- `add_recipe_to_shopping_list` — Add a recipe's ingredients, scaled to `servings` and linked to the recipe, skipping foods on hand
+- `add_meal_plan_to_shopping_list` — Add ingredients for meal plans in a date range, skipping foods on hand
+- `get_shopping_list_recipes` — Recipes/meal plans on the list with servings and their items
+- `update_shopping_list_recipe` — Change a recipe's servings; its items are rescaled
+- `remove_recipe_from_shopping_list` — Remove a recipe and the items it added (manually added items stay)
+
+**Named lists** (e.g. "Costco", "Party")
+- `get_shopping_lists`, `create_shopping_list`, `update_shopping_list` (name/description/color), `delete_shopping_list` (items stay on the main list)
+
+**Stores and aisles**
+- `get_supermarkets` — Stores with their aisle order (optional `query`)
+- `create_supermarket` / `update_supermarket` — Name, description, and `category_order` (the full walking order of aisles; missing categories are created) / `delete_supermarket`
+- `get_supermarket_categories`, `create_supermarket_category`, `update_supermarket_category`, `delete_supermarket_category` — Aisles/sections such as Produce or Dairy
+- `set_food_category` — Put foods in an aisle so they group together on the list
 ### Food & Inventory
 
 - `search_foods` — Search for foods/ingredients with fuzzy name matching
@@ -229,7 +245,6 @@ curl -X POST http://your-tandoor/api-token-auth/ \
 - `merge_foods` — Merge one food into another by ID; recipes and shopping entries move to the target and the source food is **deleted**
 - `suggest_from_inventory` — Get recipe suggestions based on current inventory
 - `get_unit_conversions` — List unit conversions, optionally filtered by food ID
-- `get_supermarkets` — List supermarkets/stores configured in Tandoor
 
 ### Meal Planning
 

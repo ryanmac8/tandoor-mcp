@@ -341,26 +341,53 @@ pub struct Nutrition {
 pub struct ShoppingListEntry {
     /// Unique entry identifier
     pub id: i32,
-    /// Food item to purchase
-    pub food: Food,
+    /// Food item to purchase (Tandoor sends a slimmer food object here than elsewhere)
+    pub food: ShoppingFood,
     /// Measurement unit (grams, cups, etc.)
     pub unit: Option<Unit>,
     /// Quantity to purchase
     pub amount: f64,
     /// Display order in the shopping list
+    #[serde(default)]
     pub order: i32,
     /// Whether this item has been purchased
     pub checked: bool,
     /// When this entry was added
-    pub created: DateTime<Utc>,
+    #[serde(rename = "created_at", default)]
+    pub created: Option<DateTime<Utc>>,
     /// When this item was marked as purchased
+    #[serde(rename = "completed_at", default)]
     pub completed: Option<DateTime<Utc>>,
     /// Optional delay before showing this item
+    #[serde(default)]
     pub delay_until: Option<DateTime<Utc>>,
     /// User who added this entry
+    #[serde(default)]
     pub created_by: serde_json::Value,
-    /// User who marked this as completed
-    pub completed_by: Option<i32>,
+    /// Set when the entry was added from a recipe or meal plan
+    #[serde(default)]
+    pub list_recipe: Option<i32>,
+    /// Named shopping lists this entry is on
+    #[serde(default)]
+    pub shopping_lists: Vec<NamedRef>,
+}
+
+/// A minimal {id, name} reference to another object.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct NamedRef {
+    pub id: i32,
+    pub name: String,
+}
+
+/// The food object embedded in a shopping list entry.
+#[derive(Debug, Serialize, Deserialize)]
+pub struct ShoppingFood {
+    pub id: i32,
+    pub name: String,
+    #[serde(default)]
+    pub plural_name: Option<String>,
+    #[serde(default)]
+    pub supermarket_category: Option<serde_json::Value>,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -529,7 +556,9 @@ pub struct UpdateFoodRequest {
 
 #[derive(Debug, Serialize, Deserialize)]
 pub struct UpdateShoppingListEntryRequest {
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub checked: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub amount: Option<f64>,
 }
 

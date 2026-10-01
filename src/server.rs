@@ -104,7 +104,13 @@ pub struct RecipeStepInput {
 #[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
 pub struct RecipeStepIngredientInput {
     /// Ingredient name. Reuses an existing Tandoor food with this name, or creates a new one.
-    pub food: String,
+    /// Omit only when `header` is set.
+    #[serde(default)]
+    pub food: Option<String>,
+    /// Section header text (e.g. "For the sauce") shown as a heading in the ingredient
+    /// list. A header entry has no food, unit, or amount.
+    #[serde(default)]
+    pub header: Option<String>,
     /// Unit name (e.g. "cup", "g"). Reuses an existing unit or creates a new one. Omit for unitless ingredients.
     #[serde(default)]
     pub unit: Option<String>,
@@ -136,10 +142,43 @@ pub struct StepUpdateInput {
     /// Food names of ingredients to remove from this step (case-insensitive exact match)
     #[serde(default)]
     pub remove_ingredients: Option<Vec<String>>,
+    /// Change existing ingredients in this step in place (amount, unit, note, food), keeping
+    /// everything you don't mention.
+    #[serde(default)]
+    pub update_ingredients: Option<Vec<IngredientEdit>>,
     /// Replace ALL of this step's ingredients with this list (other steps are unaffected).
-    /// Cannot be combined with add_ingredients / remove_ingredients.
+    /// Cannot be combined with add/remove/update_ingredients.
     #[serde(default)]
     pub replace_ingredients: Option<Vec<RecipeStepIngredientInput>>,
+}
+
+#[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
+pub struct IngredientEdit {
+    /// Food name of the ingredient to change (case-insensitive), or a header's text
+    pub food: String,
+    /// New amount (also clears "no amount")
+    #[serde(default)]
+    pub amount: Option<f64>,
+    /// true = no amount (e.g. "to taste"); the stored amount is ignored
+    #[serde(default)]
+    pub no_amount: Option<bool>,
+    /// New unit name; "" removes the unit
+    #[serde(default)]
+    pub unit: Option<String>,
+    /// New note; "" clears it
+    #[serde(default)]
+    pub note: Option<String>,
+    /// Swap the food for a different one (reused or created by name)
+    #[serde(default)]
+    pub new_food: Option<String>,
+}
+
+#[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
+pub struct MoveStepInput {
+    /// step_number of the step to move
+    pub step_number: usize,
+    /// Place it after this step_number (0 = at the beginning)
+    pub after_step: usize,
 }
 
 #[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
@@ -151,12 +190,49 @@ pub struct AddStepInput {
     pub step: RecipeStepInput,
 }
 
+/// An ingredient entry is either a food or a section header, never both.
+fn validate_ingredient(ing: &RecipeStepIngredientInput) -> Result<(), String> {
+    let has_food = ing.food.as_deref().is_some_and(|f| !f.trim().is_empty());
+    match &ing.header {
+        Some(header) if header.trim().is_empty() => Err("header text cannot be empty".to_string()),
+        Some(header) if has_food || ing.unit.is_some() || ing.amount.is_some() => Err(format!(
+            "header '{header}' cannot also have a food, unit, or amount — add the ingredient as a separate entry"
+        )),
+        Some(_) => Ok(()),
+        None if has_food => Ok(()),
+        None => Err("each ingredient needs a `food` (or a `header` for a section heading)".to_string()),
+    }
+}
+
+fn validate_steps(steps: &[RecipeStepInput]) -> Result<(), String> {
+    for (i, step) in steps.iter().enumerate() {
+        for ing in step.ingredients.iter().flatten() {
+            validate_ingredient(ing).map_err(|e| format!("step {}: {e}", i + 1))?;
+        }
+    }
+    Ok(())
+}
+
+/// Assumes `ing` passed validate_ingredient.
 fn build_ingredient_request(
     ing: RecipeStepIngredientInput,
     order: i32,
 ) -> crate::client::types::CreateStepIngredientRequest {
+    if let Some(header) = ing.header {
+        return crate::client::types::CreateStepIngredientRequest {
+            food: None,
+            unit: None,
+            amount: "0".to_string(),
+            note: Some(header.trim().to_string()),
+            order,
+            is_header: true,
+            no_amount: true,
+        };
+    }
     crate::client::types::CreateStepIngredientRequest {
-        food: crate::client::types::CreateFoodRequest { name: ing.food },
+        food: ing
+            .food
+            .map(|name| crate::client::types::CreateFoodRequest { name }),
         unit: ing
             .unit
             .map(|name| crate::client::types::CreateUnitRequest { name }),
@@ -178,13 +254,14 @@ pub struct StepPlan {
     pub steps_body: Option<serde_json::Value>,
 }
 
-/// Validates step_updates / add_steps / remove_steps against the recipe's existing steps
-/// and turns them into API requests. Nothing is sent if any part is invalid.
+/// Validates step_updates / add_steps / remove_steps / move_steps against the recipe's
+/// existing steps and turns them into API requests. Nothing is sent if any part is invalid.
 pub fn plan_step_changes(
     existing: &[crate::client::types::Step],
     updates: Vec<StepUpdateInput>,
     adds: Vec<AddStepInput>,
     removes: Vec<usize>,
+    moves: Vec<MoveStepInput>,
 ) -> Result<StepPlan, String> {
     let ordered = ordered_steps(existing);
     let count = ordered.len();
@@ -197,17 +274,40 @@ pub fn plan_step_changes(
             Ok(())
         }
     };
+    let check_after = |after: usize, what: &str| {
+        if after > count {
+            Err(format!(
+                "{what}: after_step {after} does not exist (recipe has {count} steps; use 0 for the beginning)"
+            ))
+        } else {
+            Ok(())
+        }
+    };
 
     for n in &removes {
         check(*n, "remove_steps")?;
     }
     for add in &adds {
         if let Some(after) = add.after_step {
-            if after > count {
-                return Err(format!(
-                    "add_steps: after_step {after} does not exist (recipe has {count} steps; use 0 for the beginning)"
-                ));
-            }
+            check_after(after, "add_steps")?;
+        }
+        validate_steps(std::slice::from_ref(&add.step)).map_err(|e| format!("add_steps: {e}"))?;
+    }
+    let mut moved = std::collections::HashSet::new();
+    for m in &moves {
+        check(m.step_number, "move_steps")?;
+        check_after(m.after_step, "move_steps")?;
+        if removes.contains(&m.step_number) {
+            return Err(format!(
+                "step {} is in both move_steps and remove_steps",
+                m.step_number
+            ));
+        }
+        if !moved.insert(m.step_number) {
+            return Err(format!(
+                "move_steps: step {} is listed more than once",
+                m.step_number
+            ));
         }
     }
 
@@ -237,11 +337,20 @@ pub fn plan_step_changes(
 
         let adding = update.add_ingredients.unwrap_or_default();
         let removing = update.remove_ingredients.unwrap_or_default();
+        let editing = update.update_ingredients.unwrap_or_default();
+        for ing in &adding {
+            validate_ingredient(ing).map_err(|e| format!("step {n}: {e}"))?;
+        }
+        let labels = || -> Vec<String> { step.ingredients.iter().map(ingredient_label).collect() };
+
         if let Some(replacement) = update.replace_ingredients {
-            if !adding.is_empty() || !removing.is_empty() {
+            if !adding.is_empty() || !removing.is_empty() || !editing.is_empty() {
                 return Err(format!(
-                    "step {n}: replace_ingredients cannot be combined with add_ingredients/remove_ingredients"
+                    "step {n}: replace_ingredients cannot be combined with add/remove/update_ingredients"
                 ));
+            }
+            for ing in &replacement {
+                validate_ingredient(ing).map_err(|e| format!("step {n}: {e}"))?;
             }
             let ings: Vec<_> = replacement
                 .into_iter()
@@ -249,28 +358,123 @@ pub fn plan_step_changes(
                 .map(|(i, ing)| build_ingredient_request(ing, i as i32))
                 .collect();
             body.insert("ingredients".to_string(), json!(ings));
-        } else if !adding.is_empty() || !removing.is_empty() {
+        } else if !adding.is_empty() || !removing.is_empty() || !editing.is_empty() {
             let mut kept: Vec<_> = step.ingredients.iter().collect();
             kept.sort_by_key(|ing| (ing.order, ing.id));
-            for name in &removing {
+            let matches = |kept: &[&crate::client::types::StepIngredient], name: &str| {
                 let target = name.trim().to_lowercase();
-                let before = kept.len();
-                kept.retain(|ing| ing.food.name.trim().to_lowercase() != target);
-                if kept.len() == before {
-                    let names: Vec<&str> = step
-                        .ingredients
-                        .iter()
-                        .map(|i| i.food.name.as_str())
-                        .collect();
+                kept.iter()
+                    .enumerate()
+                    .filter(|(_, ing)| ingredient_label(ing).trim().to_lowercase() == target)
+                    .map(|(i, _)| i)
+                    .collect::<Vec<_>>()
+            };
+
+            for name in &removing {
+                let found = matches(&kept, name);
+                if found.is_empty() {
                     return Err(format!(
-                        "step {n} has no ingredient '{name}'. Its ingredients are: {names:?}"
+                        "step {n} has no ingredient '{name}'. Its ingredients are: {:?}",
+                        labels()
+                    ));
+                }
+                for i in found.into_iter().rev() {
+                    kept.remove(i);
+                }
+            }
+
+            let mut changes: Vec<serde_json::Map<String, serde_json::Value>> =
+                vec![serde_json::Map::new(); kept.len()];
+            for edit in editing {
+                let found = matches(&kept, &edit.food);
+                let i = match found.as_slice() {
+                    [i] => *i,
+                    [] => {
+                        return Err(format!(
+                            "step {n} has no ingredient '{}' to update. Its ingredients are: {:?}",
+                            edit.food,
+                            labels()
+                        ))
+                    }
+                    _ => {
+                        return Err(format!(
+                            "step {n} has {} ingredients named '{}'; use replace_ingredients to change them",
+                            found.len(),
+                            edit.food
+                        ))
+                    }
+                };
+                if !changes[i].is_empty() {
+                    return Err(format!(
+                        "step {n}: ingredient '{}' is in update_ingredients more than once",
+                        edit.food
+                    ));
+                }
+                let change = &mut changes[i];
+                if kept[i].is_header
+                    && (edit.amount.is_some()
+                        || edit.no_amount.is_some()
+                        || edit.unit.is_some()
+                        || edit.new_food.is_some())
+                {
+                    return Err(format!(
+                        "step {n}: '{}' is a section header; only its text (note) can be changed",
+                        edit.food
+                    ));
+                }
+                if edit.amount.is_some() && edit.no_amount == Some(true) {
+                    return Err(format!(
+                        "step {n}: '{}' can't have both an amount and no_amount",
+                        edit.food
+                    ));
+                }
+                if let Some(amount) = edit.amount {
+                    change.insert("amount".to_string(), json!(amount.to_string()));
+                    change.insert("no_amount".to_string(), json!(false));
+                }
+                if let Some(no_amount) = edit.no_amount {
+                    change.insert("no_amount".to_string(), json!(no_amount));
+                }
+                if let Some(unit) = edit.unit {
+                    let unit = unit.trim();
+                    let value = if unit.is_empty() {
+                        serde_json::Value::Null
+                    } else {
+                        json!({"name": unit})
+                    };
+                    change.insert("unit".to_string(), value);
+                }
+                if let Some(note) = edit.note {
+                    if kept[i].is_header && note.trim().is_empty() {
+                        return Err(format!(
+                            "step {n}: header text cannot be empty (use remove_ingredients to delete it)"
+                        ));
+                    }
+                    change.insert("note".to_string(), json!(note));
+                }
+                if let Some(food) = edit.new_food {
+                    if food.trim().is_empty() {
+                        return Err(format!("step {n}: new_food cannot be empty"));
+                    }
+                    change.insert("food".to_string(), json!({"name": food.trim()}));
+                }
+                if change.is_empty() {
+                    return Err(format!(
+                        "step {n}: update for ingredient '{}' has no changes",
+                        edit.food
                     ));
                 }
             }
+
             let mut ings: Vec<serde_json::Value> = kept
                 .iter()
+                .zip(changes)
                 .enumerate()
-                .map(|(i, ing)| json!({"id": ing.id, "order": i}))
+                .map(|(i, (ing, mut change))| {
+                    change.insert("id".to_string(), json!(ing.id));
+                    change.insert("order".to_string(), json!(i));
+                    serde_json::Value::Object(change)
+                })
                 .collect();
             let start = ings.len();
             ings.extend(
@@ -288,28 +492,38 @@ pub fn plan_step_changes(
         patches.push((step.id, serde_json::Value::Object(body)));
     }
 
-    let steps_body = if adds.is_empty() && removes.is_empty() {
+    let steps_body = if adds.is_empty() && removes.is_empty() && moves.is_empty() {
         None
     } else {
-        let new_steps = |after: Option<usize>, adds: &mut Vec<AddStepInput>| {
-            let (matching, rest): (Vec<_>, Vec<_>) = std::mem::take(adds)
+        let mut adds = adds;
+        // Everything that lands right after original step `after` (0 = beginning):
+        // moved steps first, then new ones
+        let mut slot = |after: Option<usize>| {
+            let mut out: Vec<serde_json::Value> = moves
+                .iter()
+                .filter(|m| Some(m.after_step) == after)
+                .map(|m| json!({"id": ordered[m.step_number - 1].id}))
+                .collect();
+            let (matching, rest): (Vec<_>, Vec<_>) = std::mem::take(&mut adds)
                 .into_iter()
                 .partition(|a| a.after_step == after);
-            *adds = rest;
-            build_step_requests(matching.into_iter().map(|a| a.step).collect())
-                .into_iter()
-                .map(|s| json!(s))
-                .collect::<Vec<_>>()
+            adds = rest;
+            out.extend(
+                build_step_requests(matching.into_iter().map(|a| a.step).collect())
+                    .into_iter()
+                    .map(|s| json!(s)),
+            );
+            out
         };
-        let mut adds = adds;
-        let mut list = new_steps(Some(0), &mut adds);
+        let mut list = slot(Some(0));
         for (i, step) in ordered.iter().enumerate() {
-            if !removes.contains(&(i + 1)) {
+            let n = i + 1;
+            if !removes.contains(&n) && !moved.contains(&n) {
                 list.push(json!({"id": step.id}));
             }
-            list.extend(new_steps(Some(i + 1), &mut adds));
+            list.extend(slot(Some(n)));
         }
-        list.extend(new_steps(None, &mut adds));
+        list.extend(slot(None));
         for (i, step) in list.iter_mut().enumerate() {
             step["order"] = json!(i + 1);
         }
@@ -320,6 +534,15 @@ pub fn plan_step_changes(
         patches,
         steps_body,
     })
+}
+
+/// How an ingredient is referred to by name: its food, or a header's text.
+fn ingredient_label(ing: &crate::client::types::StepIngredient) -> String {
+    if ing.is_header {
+        ing.note.clone().unwrap_or_default()
+    } else {
+        ing.food_name().to_string()
+    }
 }
 
 /// Builds a recipe's new keyword list from targeted adds/removes. `known` maps lowercase
@@ -369,8 +592,11 @@ fn ordered_steps(steps: &[crate::client::types::Step]) -> Vec<&crate::client::ty
 }
 
 fn ingredient_view(ing: &crate::client::types::StepIngredient, scale: f64) -> serde_json::Value {
+    if ing.is_header {
+        return json!({"header": ing.note.clone().unwrap_or_default()});
+    }
     json!({
-        "food": ing.food.name,
+        "food": ing.food_name(),
         "amount": if ing.no_amount { None } else { Some(ing.amount * scale) },
         "unit": ing.unit.as_ref().map(|u| &u.name),
         "note": ing.note,
@@ -526,8 +752,6 @@ pub struct UpdatePantryItem {
     pub food: String,
     /// Whether the food is on hand
     pub available: bool,
-    #[serde(default)]
-    pub amount: Option<f64>,
     /// Supermarket category to assign if the food has to be created (e.g. "Produce")
     #[serde(default)]
     pub supermarket_category: Option<String>,
@@ -711,9 +935,12 @@ pub struct UpdateRecipeParams {
     /// step_numbers of steps to delete (with their ingredients).
     #[serde(default)]
     pub remove_steps: Option<Vec<usize>>,
+    /// Reorder steps without changing them.
+    #[serde(default)]
+    pub move_steps: Option<Vec<MoveStepInput>>,
     /// FULL REPLACEMENT: deletes every existing step and ingredient and writes exactly
     /// this list. Only use to rewrite the whole recipe; to change part of it use
-    /// step_updates / add_steps / remove_steps. Cannot be combined with those.
+    /// step_updates / add_steps / remove_steps / move_steps. Cannot be combined with those.
     #[serde(default, alias = "steps")]
     pub replace_all_steps: Option<Vec<RecipeStepInput>>,
 }
@@ -768,9 +995,90 @@ pub struct GetRecipeBookEntriesParams {
 }
 
 #[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
+pub struct AddRecipeToShoppingListParams {
+    pub recipe_id: i32,
+    /// Servings to shop for (amounts are scaled). Defaults to the recipe's servings.
+    #[serde(default)]
+    pub servings: Option<i32>,
+    /// Also add foods that are already on hand (default false)
+    #[serde(default)]
+    pub include_on_hand: Option<bool>,
+}
+
+#[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
+pub struct FindDuplicateFoodsParams {}
+
+#[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
+pub struct MergeFoodsParams {
+    /// ID of the food to merge away. It is DELETED after its uses move to the target.
+    pub source_id: i32,
+    /// ID of the food to keep
+    pub target_id: i32,
+}
+
+/// Groups foods whose names differ only by case, spacing, or a simple "s"/"es" plural
+/// (e.g. "Tomato" / "tomatoes"), including matches via plural_name.
+pub fn find_duplicate_food_groups(
+    foods: &[crate::client::types::Food],
+) -> Vec<Vec<&crate::client::types::Food>> {
+    fn keys(name: &str) -> Vec<String> {
+        let n = name
+            .split_whitespace()
+            .collect::<Vec<_>>()
+            .join(" ")
+            .to_lowercase();
+        let mut out = vec![n.clone()];
+        if let Some(s) = n.strip_suffix("es") {
+            out.push(s.to_string());
+        }
+        if let Some(s) = n.strip_suffix('s') {
+            out.push(s.to_string());
+        }
+        out.retain(|k| !k.is_empty());
+        out
+    }
+    fn root(parent: &mut [usize], mut i: usize) -> usize {
+        while parent[i] != i {
+            parent[i] = parent[parent[i]];
+            i = parent[i];
+        }
+        i
+    }
+
+    // Union-find over foods that share any name key
+    let mut parent: Vec<usize> = (0..foods.len()).collect();
+    let mut owner: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
+    for (i, food) in foods.iter().enumerate() {
+        let names = std::iter::once(food.name.as_str()).chain(food.plural_name.as_deref());
+        for key in names.flat_map(keys) {
+            match owner.get(&key) {
+                Some(&j) => {
+                    let (a, b) = (root(&mut parent, i), root(&mut parent, j));
+                    parent[a] = b;
+                }
+                None => {
+                    owner.insert(key, i);
+                }
+            }
+        }
+    }
+
+    let mut groups: std::collections::BTreeMap<usize, Vec<&crate::client::types::Food>> =
+        std::collections::BTreeMap::new();
+    for (i, food) in foods.iter().enumerate() {
+        let r = root(&mut parent, i);
+        groups.entry(r).or_default().push(food);
+    }
+    groups.into_values().filter(|g| g.len() > 1).collect()
+}
+
+#[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
 pub struct AddMealPlanToShoppingListParams {
     pub from_date: String,
     pub to_date: String,
+    /// Leave out foods marked on hand in the pantry (default true)
+    #[serde(default)]
+    pub skip_on_hand: Option<bool>,
 }
 
 #[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
@@ -1173,6 +1481,11 @@ impl TandoorMcpServer {
             .collect();
 
         let steps = if let Some(step_inputs) = params.steps {
+            if let Err(e) = validate_steps(&step_inputs) {
+                return Ok(CallToolResult::error(vec![Content::text(
+                    json!({"error": "Invalid recipe steps", "details": e}).to_string(),
+                )]));
+            }
             build_step_requests(step_inputs)
         } else if let Some(instructions) = params.instructions {
             vec![crate::client::types::CreateStepRequest {
@@ -2289,7 +2602,7 @@ impl TandoorMcpServer {
 
     // Inventory management tools
     #[tool(
-        description = "Update pantry inventory status (on hand / not on hand). Foods are matched by exact name or plural (case-insensitive); foods that don't exist yet are created when marked available, unless create_missing is false."
+        description = "Update pantry inventory status (on hand / not on hand). Tandoor tracks only whether a food is on hand, not how much. Foods are matched by exact name or plural (case-insensitive); foods that don't exist yet are created when marked available, unless create_missing is false."
     )]
     async fn update_pantry(
         &self,
@@ -2369,7 +2682,6 @@ impl TandoorMcpServer {
                                 "id": updated_food.id,
                                 "name": updated_food.name,
                                 "available": updated_food.food_onhand,
-                                "amount": item.amount,
                                 "status": if created { "created" } else { "updated" }
                             }));
                         }
@@ -2596,14 +2908,14 @@ impl TandoorMcpServer {
                                             let ingredient_available =
                                                 available_foods.iter().any(|food| {
                                                     food.name.to_lowercase()
-                                                        == ingredient.food.name.to_lowercase()
+                                                        == ingredient.food_name().to_lowercase()
                                                 });
 
                                             if ingredient_available {
                                                 matching_ingredients += 1;
                                             } else {
                                                 missing_ingredients
-                                                    .push(ingredient.food.name.clone());
+                                                    .push(ingredient.food_name().to_string());
                                             }
                                         }
                                     }
@@ -2703,7 +3015,7 @@ impl TandoorMcpServer {
     }
 
     #[tool(
-        description = "Update an existing recipe. Top-level fields (name, description, servings, cooking_time, waiting_time, source_url, source_title) change only what you pass. Keywords/tags: `add_keywords` / `remove_keywords` (by name) change just those; `replace_all_keywords` is a FULL REPLACEMENT of the keyword list. To edit steps, call get_recipe_details first and refer to steps by their step_number: `step_updates` edits specific steps and their ingredients (add/remove/replace), `add_steps` inserts new steps, `remove_steps` deletes steps; all other steps stay untouched. `replace_all_steps` is a FULL REPLACEMENT that deletes every existing step and ingredient — only use it to rewrite the whole recipe. Returns the recipe's resulting steps so you can verify."
+        description = "Update an existing recipe. Top-level fields (name, description, servings, cooking_time, waiting_time, source_url, source_title) change only what you pass. Keywords/tags: `add_keywords` / `remove_keywords` (by name) change just those; `replace_all_keywords` is a FULL REPLACEMENT of the keyword list. To edit steps, call get_recipe_details first and refer to steps by their step_number: `step_updates` edits specific steps and their ingredients (add_ingredients, remove_ingredients, update_ingredients to change an amount/unit/note/food in place, or replace_ingredients), `add_steps` inserts new steps, `move_steps` reorders, `remove_steps` deletes; all other steps stay untouched. An ingredient entry of {\"header\": \"For the sauce\"} is a section heading. `replace_all_steps` is a FULL REPLACEMENT that deletes every existing step and ingredient — only use it to rewrite the whole recipe. Returns the recipe's resulting steps so you can verify."
     )]
     async fn update_recipe(
         &self,
@@ -2750,14 +3062,16 @@ impl TandoorMcpServer {
         let updates = params.step_updates.unwrap_or_default();
         let adds = params.add_steps.unwrap_or_default();
         let removes = params.remove_steps.unwrap_or_default();
-        let targeted_steps = !updates.is_empty() || !adds.is_empty() || !removes.is_empty();
+        let moves = params.move_steps.unwrap_or_default();
+        let targeted_steps =
+            !updates.is_empty() || !adds.is_empty() || !removes.is_empty() || !moves.is_empty();
         let add_kw = params.add_keywords.unwrap_or_default();
         let remove_kw = params.remove_keywords.unwrap_or_default();
         let targeted_keywords = !add_kw.is_empty() || !remove_kw.is_empty();
 
         if params.replace_all_steps.is_some() && targeted_steps {
             return reject(
-                "replace_all_steps cannot be combined with step_updates/add_steps/remove_steps"
+                "replace_all_steps cannot be combined with step_updates/add_steps/remove_steps/move_steps"
                     .to_string(),
             );
         }
@@ -2808,13 +3122,16 @@ impl TandoorMcpServer {
 
         let mut step_patches = Vec::new();
         if let Some(step_inputs) = params.replace_all_steps {
+            if let Err(e) = validate_steps(&step_inputs) {
+                return reject(e);
+            }
             let steps = build_step_requests(step_inputs);
             body.insert(
                 "steps".to_string(),
                 serde_json::to_value(steps).expect("CreateStepRequest always serializes"),
             );
         } else if let (true, Some(current)) = (targeted_steps, &current) {
-            let plan = match plan_step_changes(&current.steps, updates, adds, removes) {
+            let plan = match plan_step_changes(&current.steps, updates, adds, removes, moves) {
                 Ok(p) => p,
                 Err(message) => return reject(message),
             };
@@ -3165,7 +3482,198 @@ impl TandoorMcpServer {
     }
 
     #[tool(
-        description = "Add all recipe ingredients from meal plans in a date range to the shopping list"
+        description = "Add a recipe's ingredients to the shopping list, scaled to `servings`, skipping foods already on hand in the pantry (listed in skipped_on_hand) unless include_on_hand is true. Entries are linked to the recipe in Tandoor."
+    )]
+    async fn add_recipe_to_shopping_list(
+        &self,
+        Parameters(params): Parameters<AddRecipeToShoppingListParams>,
+    ) -> Result<CallToolResult, McpError> {
+        let client = match self.ensure_authenticated().await {
+            Ok(c) => c,
+            Err(e) => {
+                return Ok(CallToolResult::error(vec![Content::text(
+                    json!({"error": "Authentication Error", "details": e.to_string()}).to_string(),
+                )]));
+            }
+        };
+        let fail = |message: String| {
+            Ok(CallToolResult::error(vec![Content::text(
+                json!({"error": "Failed to add recipe to shopping list", "details": message})
+                    .to_string(),
+            )]))
+        };
+
+        let recipe = match client.get_recipe(params.recipe_id).await {
+            Ok(r) => r,
+            Err(e) => return fail(e.to_string()),
+        };
+        let base_servings = recipe.servings.unwrap_or(1).max(1);
+        let servings = params.servings.unwrap_or(base_servings);
+        if servings <= 0 {
+            return fail("servings must be at least 1".to_string());
+        }
+        let scale = servings as f64 / base_servings as f64;
+        let include_on_hand = params.include_on_hand.unwrap_or(false);
+
+        let mut ingredient_ids = Vec::new();
+        let mut adding = Vec::new();
+        let mut skipped_on_hand: Vec<String> = Vec::new();
+        for step in ordered_steps(&recipe.steps) {
+            for ing in &step.ingredients {
+                let Some(food) = ing.food.as_ref() else {
+                    continue;
+                };
+                if ing.is_header {
+                    continue;
+                }
+                if food.food_onhand && !include_on_hand {
+                    if !skipped_on_hand.contains(&food.name) {
+                        skipped_on_hand.push(food.name.clone());
+                    }
+                    continue;
+                }
+                ingredient_ids.push(ing.id);
+                adding.push(json!({
+                    "food": food.name,
+                    "amount": if ing.no_amount { None } else { Some((ing.amount * scale * 100.0).round() / 100.0) },
+                    "unit": ing.unit.as_ref().map(|u| &u.name)
+                }));
+            }
+        }
+
+        if ingredient_ids.is_empty() {
+            return Ok(CallToolResult::success(vec![Content::text(
+                serde_json::to_string_pretty(&json!({
+                    "recipe": recipe.name,
+                    "added": [],
+                    "skipped_on_hand": skipped_on_hand,
+                    "message": "Nothing to add: every ingredient is already on hand"
+                }))
+                .unwrap(),
+            )]));
+        }
+
+        if let Err(e) = client
+            .add_recipe_to_shopping_list(recipe.id, servings, &ingredient_ids)
+            .await
+        {
+            return fail(e.to_string());
+        }
+
+        Ok(CallToolResult::success(vec![Content::text(
+            serde_json::to_string_pretty(&json!({
+                "recipe": recipe.name,
+                "servings": servings,
+                "added": adding,
+                "skipped_on_hand": skipped_on_hand,
+                "message": format!(
+                    "Added {} ingredients from {} ({} skipped as on hand)",
+                    ingredient_ids.len(),
+                    recipe.name,
+                    skipped_on_hand.len()
+                )
+            }))
+            .unwrap(),
+        )]))
+    }
+
+    #[tool(
+        description = "Find foods that look like duplicates (same name apart from case, spacing, or a simple plural, e.g. \"Tomato\" / \"tomatoes\"). Use merge_foods to combine them."
+    )]
+    async fn find_duplicate_foods(
+        &self,
+        Parameters(_params): Parameters<FindDuplicateFoodsParams>,
+    ) -> Result<CallToolResult, McpError> {
+        let client = match self.ensure_authenticated().await {
+            Ok(c) => c,
+            Err(e) => {
+                return Ok(CallToolResult::error(vec![Content::text(
+                    json!({"error": "Authentication Error", "details": e.to_string()}).to_string(),
+                )]));
+            }
+        };
+
+        let foods = match client.list_all_foods().await {
+            Ok(f) => f,
+            Err(e) => {
+                return Ok(CallToolResult::error(vec![Content::text(
+                    json!({"error": "Failed to list foods", "details": e.to_string()}).to_string(),
+                )]));
+            }
+        };
+
+        let groups: Vec<serde_json::Value> = find_duplicate_food_groups(&foods)
+            .into_iter()
+            .map(|group| {
+                json!(group
+                    .iter()
+                    .map(|f| json!({
+                        "id": f.id,
+                        "name": f.name,
+                        "plural_name": f.plural_name,
+                        "on_hand": f.food_onhand
+                    }))
+                    .collect::<Vec<_>>())
+            })
+            .collect();
+
+        Ok(CallToolResult::success(vec![Content::text(
+            serde_json::to_string_pretty(&json!({
+                "foods_checked": foods.len(),
+                "duplicate_groups": groups,
+            }))
+            .unwrap(),
+        )]))
+    }
+
+    #[tool(
+        description = "Merge one food into another: every recipe ingredient, shopping list entry, etc. using the source food is moved to the target, then the source food is DELETED. Permanent — confirm with the user first. Use find_duplicate_foods or search_foods to get the IDs."
+    )]
+    async fn merge_foods(
+        &self,
+        Parameters(params): Parameters<MergeFoodsParams>,
+    ) -> Result<CallToolResult, McpError> {
+        let client = match self.ensure_authenticated().await {
+            Ok(c) => c,
+            Err(e) => {
+                return Ok(CallToolResult::error(vec![Content::text(
+                    json!({"error": "Authentication Error", "details": e.to_string()}).to_string(),
+                )]));
+            }
+        };
+        let fail = |message: String| {
+            Ok(CallToolResult::error(vec![Content::text(
+                json!({"error": "Failed to merge foods", "details": message}).to_string(),
+            )]))
+        };
+
+        if params.source_id == params.target_id {
+            return fail("source_id and target_id are the same food".to_string());
+        }
+        let source = match client.get_food(params.source_id).await {
+            Ok(f) => f,
+            Err(e) => return fail(e.to_string()),
+        };
+        let target = match client.get_food(params.target_id).await {
+            Ok(f) => f,
+            Err(e) => return fail(e.to_string()),
+        };
+        if let Err(e) = client.merge_food(source.id, target.id).await {
+            return fail(e.to_string());
+        }
+
+        Ok(CallToolResult::success(vec![Content::text(
+            serde_json::to_string_pretty(&json!({
+                "merged": source.name,
+                "into": {"id": target.id, "name": target.name},
+                "message": format!("Merged '{}' into '{}'; '{}' was deleted", source.name, target.name, source.name)
+            }))
+            .unwrap(),
+        )]))
+    }
+
+    #[tool(
+        description = "Add all recipe ingredients from meal plans in a date range to the shopping list. Foods already on hand are skipped (listed in skipped_on_hand) unless skip_on_hand is false."
     )]
     async fn add_meal_plan_to_shopping_list(
         &self,
@@ -3196,6 +3704,8 @@ impl TandoorMcpServer {
         let mut added = 0usize;
         let mut skipped = 0usize;
         let mut added_items: Vec<serde_json::Value> = Vec::new();
+        let skip_on_hand = params.skip_on_hand.unwrap_or(true);
+        let mut skipped_on_hand: Vec<String> = Vec::new();
 
         for plan in &meal_plans {
             let recipe = match &plan.recipe {
@@ -3218,11 +3728,20 @@ impl TandoorMcpServer {
 
             for step in &detailed.steps {
                 for ingredient in &step.ingredients {
+                    let Some(food) = ingredient.food.as_ref() else {
+                        continue;
+                    };
                     if ingredient.is_header || ingredient.no_amount {
                         continue;
                     }
+                    if skip_on_hand && food.food_onhand {
+                        if !skipped_on_hand.contains(&food.name) {
+                            skipped_on_hand.push(food.name.clone());
+                        }
+                        continue;
+                    }
                     let request = crate::client::types::CreateShoppingListEntryRequest {
-                        food: ingredient.food.id,
+                        food: food.id,
                         unit: ingredient.unit.as_ref().map(|u| u.id),
                         amount: (ingredient.amount * scale * 10.0).round() / 10.0,
                     };
@@ -3230,7 +3749,7 @@ impl TandoorMcpServer {
                         Ok(_) => {
                             added += 1;
                             added_items.push(json!({
-                                "food": ingredient.food.name,
+                                "food": food.name,
                                 "amount": (ingredient.amount * scale * 10.0).round() / 10.0,
                                 "unit": ingredient.unit.as_ref().map(|u| &u.name),
                                 "from_recipe": recipe.name
@@ -3249,6 +3768,7 @@ impl TandoorMcpServer {
                 "added": added,
                 "skipped": skipped,
                 "meal_plans_processed": meal_plans.len(),
+                "skipped_on_hand": skipped_on_hand,
                 "items": added_items,
                 "message": format!(
                     "Added {} ingredients to shopping list from {} meal plans ({} to {})",
@@ -3374,16 +3894,16 @@ impl ServerHandler for TandoorMcpServer {
                 READ-ONLY tools (safe to call freely): search_recipes, get_recipe_details, \
                 get_shopping_list, search_foods, get_keywords, get_units, get_meal_plans, \
                 get_meal_types, get_cook_log, suggest_from_inventory, get_recipe_books, \
-                get_recipe_book_entries, get_supermarkets, get_unit_conversions. \
+                get_recipe_book_entries, get_supermarkets, get_unit_conversions, find_duplicate_foods. \
                 WRITE tools (modify data — confirm intent before calling): create_recipe, \
                 import_recipe_from_url, update_recipe, add_to_shopping_list, \
                 check_shopping_items, update_shopping_list_item, clear_shopping_list, \
                 update_pantry, create_meal_plan, update_meal_plan, log_cooked_recipe, \
                 create_recipe_book, update_recipe_book, add_to_recipe_book, \
-                add_meal_plan_to_shopping_list. \
+                add_meal_plan_to_shopping_list, add_recipe_to_shopping_list. \
                 DESTRUCTIVE tools (permanent delete — always confirm with user first): \
                 delete_recipe, delete_meal_plan, delete_recipe_book, remove_from_recipe_book, \
-                remove_from_shopping_list."
+                remove_from_shopping_list, merge_foods (deletes the source food)."
                     .to_string(),
             ),
         }
@@ -3410,13 +3930,15 @@ mod tests {
                 name: Some("Prep".to_string()),
                 ingredients: Some(vec![
                     RecipeStepIngredientInput {
-                        food: "Onion".to_string(),
+                        food: Some("Onion".to_string()),
+                        header: None,
                         unit: Some("cup".to_string()),
                         amount: Some(1.5),
                         note: Some("diced".to_string()),
                     },
                     RecipeStepIngredientInput {
-                        food: "Garlic".to_string(),
+                        food: Some("Garlic".to_string()),
+                        header: None,
                         unit: None,
                         amount: Some(2.0),
                         note: None,
@@ -3440,7 +3962,7 @@ mod tests {
         assert!(requests[1].ingredients.is_empty());
 
         let onion = &requests[0].ingredients[0];
-        assert_eq!(onion.food.name, "Onion");
+        assert_eq!(onion.food.as_ref().unwrap().name, "Onion");
         assert_eq!(onion.unit.as_ref().unwrap().name, "cup");
         assert_eq!(onion.amount, "1.5");
         assert_eq!(onion.note.as_deref(), Some("diced"));
@@ -3449,7 +3971,7 @@ mod tests {
         assert!(!onion.no_amount);
 
         let garlic = &requests[0].ingredients[1];
-        assert_eq!(garlic.food.name, "Garlic");
+        assert_eq!(garlic.food.as_ref().unwrap().name, "Garlic");
         assert!(garlic.unit.is_none());
         assert_eq!(garlic.order, 1);
     }
@@ -3463,7 +3985,8 @@ mod tests {
     fn ingredient_without_amount_is_no_amount() {
         let req = build_ingredient_request(
             RecipeStepIngredientInput {
-                food: "Salt".to_string(),
+                food: Some("Salt".to_string()),
+                header: None,
                 unit: None,
                 amount: None,
                 note: Some("to taste".to_string()),
@@ -3504,6 +4027,7 @@ mod tests {
             time: None,
             add_ingredients: None,
             remove_ingredients: None,
+            update_ingredients: None,
             replace_ingredients: None,
         }
     }
@@ -3524,7 +4048,7 @@ mod tests {
     fn step_update_patches_only_the_numbered_step() {
         let mut u = update(2);
         u.instruction = Some("Bake at 350F".to_string());
-        let plan = plan_step_changes(&sample_steps(), vec![u], vec![], vec![]).unwrap();
+        let plan = plan_step_changes(&sample_steps(), vec![u], vec![], vec![], vec![]).unwrap();
         assert_eq!(plan.patches.len(), 1);
         assert_eq!(plan.patches[0].0, 20);
         assert_eq!(plan.patches[0].1, json!({"instruction": "Bake at 350F"}));
@@ -3536,12 +4060,13 @@ mod tests {
         let mut u = update(1);
         u.remove_ingredients = Some(vec!["flour".to_string()]);
         u.add_ingredients = Some(vec![RecipeStepIngredientInput {
-            food: "Butter".to_string(),
+            food: Some("Butter".to_string()),
+            header: None,
             unit: Some("g".to_string()),
             amount: Some(50.0),
             note: None,
         }]);
-        let plan = plan_step_changes(&sample_steps(), vec![u], vec![], vec![]).unwrap();
+        let plan = plan_step_changes(&sample_steps(), vec![u], vec![], vec![], vec![]).unwrap();
         let ings = plan.patches[0].1["ingredients"].as_array().unwrap();
         assert_eq!(ings[0], json!({"id": 102, "order": 0}));
         assert_eq!(ings[1]["food"]["name"], "Butter");
@@ -3553,15 +4078,16 @@ mod tests {
     fn step_update_rejects_unknown_ingredient_and_bad_step() {
         let mut u = update(1);
         u.remove_ingredients = Some(vec!["Milk".to_string()]);
-        let err = plan_step_changes(&sample_steps(), vec![u], vec![], vec![]).unwrap_err();
+        let err = plan_step_changes(&sample_steps(), vec![u], vec![], vec![], vec![]).unwrap_err();
         assert!(err.contains("no ingredient 'Milk'"), "{err}");
 
         let mut u = update(3);
         u.instruction = Some("x".to_string());
-        let err = plan_step_changes(&sample_steps(), vec![u], vec![], vec![]).unwrap_err();
+        let err = plan_step_changes(&sample_steps(), vec![u], vec![], vec![], vec![]).unwrap_err();
         assert!(err.contains("step 3 does not exist"), "{err}");
 
-        let err = plan_step_changes(&sample_steps(), vec![update(1)], vec![], vec![]).unwrap_err();
+        let err = plan_step_changes(&sample_steps(), vec![update(1)], vec![], vec![], vec![])
+            .unwrap_err();
         assert!(err.contains("no changes"), "{err}");
     }
 
@@ -3592,7 +4118,7 @@ mod tests {
             new_step("Rest", Some(1)),
             new_step("Serve", None),
         ];
-        let plan = plan_step_changes(&sample_steps(), vec![], adds, vec![2]).unwrap();
+        let plan = plan_step_changes(&sample_steps(), vec![], adds, vec![2], vec![]).unwrap();
         let steps = plan.steps_body.unwrap();
         let steps = steps.as_array().unwrap();
         let summary: Vec<String> = steps
@@ -3603,5 +4129,183 @@ mod tests {
             })
             .collect();
         assert_eq!(summary, ["Preheat@1", "id10@2", "Rest@3", "Serve@4"]);
+    }
+
+    fn header(id: i32, text: &str, order: i32) -> serde_json::Value {
+        json!({
+            "id": id, "amount": 0.0, "note": text, "order": order, "is_header": true,
+            "no_amount": true, "unit": null, "food": null
+        })
+    }
+
+    fn food_input(name: &str) -> RecipeStepIngredientInput {
+        RecipeStepIngredientInput {
+            food: Some(name.to_string()),
+            header: None,
+            unit: None,
+            amount: None,
+            note: None,
+        }
+    }
+
+    fn edit(food: &str) -> IngredientEdit {
+        IngredientEdit {
+            food: food.to_string(),
+            amount: None,
+            no_amount: None,
+            unit: None,
+            note: None,
+            new_food: None,
+        }
+    }
+
+    /// One step: header "For the sauce", Tomato, Salt
+    fn steps_with_header() -> Vec<crate::client::types::Step> {
+        serde_json::from_value(json!([
+            {"id": 30, "name": "", "instruction": "Sauce", "time": null, "order": 1, "file": null,
+             "ingredients": [header(300, "For the sauce", 0), ingredient(301, "Tomato", 1),
+                             ingredient(302, "Salt", 2)]}
+        ]))
+        .unwrap()
+    }
+
+    #[test]
+    fn header_ingredient_parses_and_renders_as_header() {
+        let steps = steps_with_header();
+        let view = steps_view(&steps, 1.0);
+        assert_eq!(
+            view[0]["ingredients"][0],
+            json!({"header": "For the sauce"})
+        );
+        assert_eq!(view[0]["ingredients"][1]["food"], "Tomato");
+    }
+
+    #[test]
+    fn header_input_validation_and_request() {
+        let mut h = food_input("x");
+        h.food = None;
+        h.header = Some("For the sauce".to_string());
+        assert!(validate_ingredient(&h).is_ok());
+        let req = build_ingredient_request(h, 0);
+        assert!(req.is_header && req.food.is_none());
+        assert_eq!(req.note.as_deref(), Some("For the sauce"));
+
+        let mut both = food_input("Tomato");
+        both.header = Some("Sauce".to_string());
+        assert!(validate_ingredient(&both).is_err());
+
+        let mut neither = food_input("x");
+        neither.food = None;
+        assert!(validate_ingredient(&neither).is_err());
+    }
+
+    #[test]
+    fn update_ingredients_changes_only_given_fields() {
+        let mut e = edit("tomato");
+        e.amount = Some(250.0);
+        e.unit = Some("".to_string());
+        let mut s = edit("Salt");
+        s.no_amount = Some(true);
+        let mut h = edit("for the sauce");
+        h.note = Some("Sauce".to_string());
+        let mut u = update(1);
+        u.update_ingredients = Some(vec![e, s, h]);
+        let plan =
+            plan_step_changes(&steps_with_header(), vec![u], vec![], vec![], vec![]).unwrap();
+        let ings = &plan.patches[0].1["ingredients"];
+        assert_eq!(ings[0], json!({"id": 300, "order": 0, "note": "Sauce"}));
+        assert_eq!(
+            ings[1],
+            json!({"id": 301, "order": 1, "amount": "250", "no_amount": false, "unit": null})
+        );
+        assert_eq!(ings[2], json!({"id": 302, "order": 2, "no_amount": true}));
+    }
+
+    #[test]
+    fn update_ingredients_rejects_bad_edits() {
+        let run = |e: IngredientEdit| {
+            let mut u = update(1);
+            u.update_ingredients = Some(vec![e]);
+            plan_step_changes(&steps_with_header(), vec![u], vec![], vec![], vec![]).unwrap_err()
+        };
+        let mut amount_on_header = edit("For the sauce");
+        amount_on_header.amount = Some(1.0);
+        assert!(run(amount_on_header).contains("section header"));
+        let mut missing = edit("Milk");
+        missing.amount = Some(1.0);
+        assert!(run(missing).contains("no ingredient 'Milk'"));
+        assert!(run(edit("Tomato")).contains("no changes"));
+
+        // Same food twice in one step is ambiguous
+        let dup: Vec<crate::client::types::Step> = serde_json::from_value(json!([
+            {"id": 40, "name": "", "instruction": "x", "time": null, "order": 1, "file": null,
+             "ingredients": [ingredient(401, "Salt", 0), ingredient(402, "Salt", 1)]}
+        ]))
+        .unwrap();
+        let mut e = edit("salt");
+        e.amount = Some(1.0);
+        let mut u = update(1);
+        u.update_ingredients = Some(vec![e]);
+        let err = plan_step_changes(&dup, vec![u], vec![], vec![], vec![]).unwrap_err();
+        assert!(err.contains("2 ingredients named"), "{err}");
+    }
+
+    #[test]
+    fn move_steps_reorders_by_reference() {
+        // sample_steps: step 1 = id 10, step 2 = id 20
+        let moves = vec![MoveStepInput {
+            step_number: 2,
+            after_step: 0,
+        }];
+        let plan = plan_step_changes(&sample_steps(), vec![], vec![], vec![], moves).unwrap();
+        assert_eq!(
+            plan.steps_body.unwrap(),
+            json!([{"id": 20, "order": 1}, {"id": 10, "order": 2}])
+        );
+
+        let bad = vec![MoveStepInput {
+            step_number: 1,
+            after_step: 5,
+        }];
+        assert!(plan_step_changes(&sample_steps(), vec![], vec![], vec![], bad).is_err());
+    }
+
+    #[test]
+    fn duplicate_food_groups_match_case_and_plurals() {
+        let foods: Vec<crate::client::types::Food> = serde_json::from_value(
+            json!([
+                {"id": 1, "name": "Tomato", "plural_name": null},
+                {"id": 2, "name": "tomatoes", "plural_name": null},
+                {"id": 3, "name": "Egg", "plural_name": "Eggs"},
+                {"id": 4, "name": "eggs", "plural_name": null},
+                {"id": 5, "name": "Butter", "plural_name": null},
+                {"id": 6, "name": "Peanut  Butter", "plural_name": null},
+                {"id": 7, "name": "peanut butter", "plural_name": null}
+            ])
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|f| {
+                let mut f = f.clone();
+                for (k, v) in [
+                    ("description", json!(null)),
+                    ("recipe", json!(null)),
+                    ("food_onhand", json!(false)),
+                    ("supermarket_category", json!(null)),
+                    ("inherit_fields", json!([])),
+                    ("properties", json!([])),
+                ] {
+                    f[k] = v;
+                }
+                f
+            })
+            .collect(),
+        )
+        .unwrap();
+        let ids: Vec<Vec<i32>> = find_duplicate_food_groups(&foods)
+            .iter()
+            .map(|g| g.iter().map(|f| f.id).collect())
+            .collect();
+        assert_eq!(ids, vec![vec![1, 2], vec![3, 4], vec![6, 7]]);
     }
 }

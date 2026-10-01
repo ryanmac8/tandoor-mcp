@@ -502,6 +502,19 @@ pub struct CreateCookLogRequest {
 }
 
 #[derive(Debug, Serialize, Deserialize)]
+pub struct NewFoodRequest {
+    pub name: String,
+    pub food_onhand: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub supermarket_category: Option<SupermarketCategoryRef>,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct SupermarketCategoryRef {
+    pub name: String,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
 pub struct UpdateFoodRequest {
     pub food_onhand: Option<bool>,
 }

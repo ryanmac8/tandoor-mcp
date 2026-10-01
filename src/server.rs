@@ -90,13 +90,13 @@ pub struct CreateRecipeParams {
 pub struct RecipeStepInput {
     /// Instruction text for this step
     pub instruction: String,
-    /// Optional step title
+    /// Step title (optional; omit for none)
     #[serde(default)]
     pub name: Option<String>,
-    /// Ingredients used in this step
+    /// Ingredients used in this step (optional)
     #[serde(default)]
     pub ingredients: Option<Vec<RecipeStepIngredientInput>>,
-    /// Time for this step in minutes
+    /// Time for this step in minutes (optional; omit for none)
     #[serde(default)]
     pub time: Option<i32>,
 }
@@ -3974,6 +3974,21 @@ mod tests {
         assert_eq!(garlic.food.as_ref().unwrap().name, "Garlic");
         assert!(garlic.unit.is_none());
         assert_eq!(garlic.order, 1);
+    }
+
+    #[test]
+    fn optional_step_fields_are_omitted_not_null() {
+        // Tandoor rejects null for a step's name/time, so unset fields must be left out
+        let steps = build_step_requests(vec![RecipeStepInput {
+            instruction: "Mix".to_string(),
+            name: None,
+            ingredients: None,
+            time: None,
+        }]);
+        let body = serde_json::to_value(&steps[0]).unwrap();
+        assert!(body.get("name").is_none(), "{body}");
+        assert!(body.get("time").is_none(), "{body}");
+        assert_eq!(body["instruction"], "Mix");
     }
 
     #[test]

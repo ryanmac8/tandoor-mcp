@@ -367,6 +367,16 @@ pub struct ShoppingListEntry {
     /// Set when the entry was added from a recipe or meal plan
     #[serde(default)]
     pub list_recipe: Option<i32>,
+    /// Named shopping lists this entry is on
+    #[serde(default)]
+    pub shopping_lists: Vec<NamedRef>,
+}
+
+/// A minimal {id, name} reference to another object.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct NamedRef {
+    pub id: i32,
+    pub name: String,
 }
 
 /// The food object embedded in a shopping list entry.

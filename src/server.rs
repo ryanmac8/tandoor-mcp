@@ -685,6 +685,9 @@ pub struct AddToShoppingListParams {
     /// adding a second one (default true)
     #[serde(default)]
     pub merge_with_existing: Option<bool>,
+    /// Also put the items on this named shopping list (name or ID; created if the name is new)
+    #[serde(default)]
+    pub shopping_list: Option<NameOrId>,
 }
 
 /// A shopping list item: the food's name as it appears on the list, or an entry ID
@@ -698,10 +701,401 @@ pub enum ShoppingRef {
     Name(String),
 }
 
+/// Something referred to by name (case-insensitive) or by ID.
+#[derive(Debug, Clone, serde::Deserialize, serde::Serialize, schemars::JsonSchema)]
+#[serde(untagged)]
+pub enum NameOrId {
+    Id(i64),
+    Name(String),
+}
+
+/// Finds the object a NameOrId points to among `items` (JSON objects with "id" and
+/// "name"): exact ID, else exact case-insensitive name, else a partial name match only
+/// when it is unambiguous.
+fn resolve_named<'a>(
+    items: &'a [serde_json::Value],
+    target: &NameOrId,
+    what: &str,
+) -> Result<&'a serde_json::Value, String> {
+    let name_of = |v: &serde_json::Value| v["name"].as_str().unwrap_or("").to_string();
+    match target {
+        NameOrId::Id(id) => items
+            .iter()
+            .find(|v| v["id"].as_i64() == Some(*id))
+            .ok_or_else(|| format!("No {what} with ID {id}")),
+        NameOrId::Name(name) => {
+            let lower = name.trim().to_lowercase();
+            if let Some(v) = items.iter().find(|v| name_of(v).to_lowercase() == lower) {
+                return Ok(v);
+            }
+            let partial: Vec<_> = items
+                .iter()
+                .filter(|v| name_of(v).to_lowercase().contains(&lower))
+                .collect();
+            match partial.as_slice() {
+                [v] => Ok(v),
+                [] => {
+                    let mut names: Vec<String> = items.iter().map(name_of).collect();
+                    names.truncate(25);
+                    Err(format!("No {what} named '{name}'. Existing: {names:?}"))
+                }
+                many => {
+                    let names: Vec<String> = many.iter().map(|v| name_of(v)).collect();
+                    Err(format!(
+                        "'{name}' matches several {what}s: {names:?}. Use the exact name or ID"
+                    ))
+                }
+            }
+        }
+    }
+}
+
+fn shopping_list_view(v: &serde_json::Value) -> serde_json::Value {
+    json!({"id": v["id"], "name": v["name"], "description": v["description"], "color": v["color"]})
+}
+
+fn category_view(v: &serde_json::Value) -> serde_json::Value {
+    json!({"id": v["id"], "name": v["name"], "description": v["description"]})
+}
+
+/// A supermarket with its aisles (categories) in walking order.
+fn supermarket_view(v: &serde_json::Value) -> serde_json::Value {
+    let mut relations: Vec<&serde_json::Value> = v["category_to_supermarket"]
+        .as_array()
+        .map(|a| a.iter().collect())
+        .unwrap_or_default();
+    relations.sort_by_key(|r| {
+        (
+            r["order"].as_i64().unwrap_or(0),
+            r["id"].as_i64().unwrap_or(0),
+        )
+    });
+    json!({
+        "id": v["id"],
+        "name": v["name"],
+        "description": v["description"],
+        "category_order": relations.iter().map(|r| r["category"]["name"].clone()).collect::<Vec<_>>()
+    })
+}
+
+/// Shopping-list recipe groups, named after their recipe so they can be referred to
+/// by recipe name.
+fn recipe_group_view(
+    v: &serde_json::Value,
+    entries: &[crate::client::types::ShoppingListEntry],
+) -> serde_json::Value {
+    let id = v["id"].as_i64().unwrap_or(0);
+    let name = v["recipe_data"]["name"]
+        .as_str()
+        .filter(|s| !s.is_empty())
+        .or_else(|| v["name"].as_str().filter(|s| !s.is_empty()))
+        .or_else(|| v["meal_plan_data"]["title"].as_str())
+        .unwrap_or("");
+    let items: Vec<_> = entries
+        .iter()
+        .filter(|e| e.list_recipe.map(i64::from) == Some(id))
+        .map(|e| json!({"food": e.food.name, "amount": e.amount, "unit": e.unit.as_ref().map(|u| &u.name), "checked": e.checked}))
+        .collect();
+    json!({
+        "id": id,
+        "name": name,
+        "recipe_id": v["recipe"],
+        "meal_plan_id": v["mealplan"],
+        "servings": v["servings"],
+        "items": items
+    })
+}
+
+#[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
+pub struct EmptyParams {}
+
+#[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
+pub struct CreateShoppingListParams {
+    /// List name, e.g. "Costco" or "Party"
+    pub name: String,
+    #[serde(default)]
+    pub description: Option<String>,
+    /// Hex color, e.g. "#2e7d32"
+    #[serde(default)]
+    pub color: Option<String>,
+}
+
+#[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
+pub struct UpdateShoppingListParams {
+    /// The list to change (name or ID)
+    pub shopping_list: NameOrId,
+    /// New name
+    #[serde(default)]
+    pub name: Option<String>,
+    #[serde(default)]
+    pub description: Option<String>,
+    /// Hex color, e.g. "#2e7d32"
+    #[serde(default)]
+    pub color: Option<String>,
+}
+
+#[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
+pub struct DeleteShoppingListParams {
+    /// The list to delete (name or ID)
+    pub shopping_list: NameOrId,
+}
+
+#[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
+pub struct UpdateShoppingListRecipeParams {
+    /// The recipe on the shopping list (recipe name, or group ID from get_shopping_list_recipes)
+    pub recipe: NameOrId,
+    /// New number of servings; that recipe's item amounts are rescaled
+    pub servings: f64,
+}
+
+#[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
+pub struct RemoveRecipeFromShoppingListParams {
+    /// The recipe on the shopping list (recipe name, or group ID from get_shopping_list_recipes)
+    pub recipe: NameOrId,
+}
+
+#[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
+pub struct CreateSupermarketParams {
+    pub name: String,
+    #[serde(default)]
+    pub description: Option<String>,
+    /// Category (aisle) names in the order you walk the store; missing categories are created
+    #[serde(default)]
+    pub category_order: Option<Vec<String>>,
+}
+
+#[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
+pub struct UpdateSupermarketParams {
+    /// The supermarket to change (name or ID)
+    pub supermarket: NameOrId,
+    /// New name
+    #[serde(default)]
+    pub name: Option<String>,
+    #[serde(default)]
+    pub description: Option<String>,
+    /// FULL aisle order for this store: category names in walking order. Categories not
+    /// listed are removed from this store (the categories themselves are kept).
+    #[serde(default)]
+    pub category_order: Option<Vec<String>>,
+}
+
+#[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
+pub struct DeleteSupermarketParams {
+    /// The supermarket to delete (name or ID)
+    pub supermarket: NameOrId,
+}
+
+#[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
+pub struct CreateSupermarketCategoryParams {
+    /// Category (aisle/section) name, e.g. "Produce"
+    pub name: String,
+    #[serde(default)]
+    pub description: Option<String>,
+}
+
+#[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
+pub struct UpdateSupermarketCategoryParams {
+    /// The category to change (name or ID)
+    pub category: NameOrId,
+    /// New name
+    #[serde(default)]
+    pub name: Option<String>,
+    #[serde(default)]
+    pub description: Option<String>,
+}
+
+#[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
+pub struct DeleteSupermarketCategoryParams {
+    /// The category to delete (name or ID)
+    pub category: NameOrId,
+}
+
+#[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
+pub struct SetFoodCategoryParams {
+    /// Food names, e.g. ["lemons", "parsley"]
+    pub foods: Vec<String>,
+    /// Category (aisle) name, e.g. "Produce"; created if new. Omit or "" to clear.
+    #[serde(default)]
+    pub category: Option<String>,
+}
+
+/// Authenticates or returns an "Authentication Error" tool result from the handler.
+macro_rules! auth_or_return {
+    ($server:expr) => {
+        match $server.ensure_authenticated().await {
+            Ok(c) => c,
+            Err(e) => return tool_err("Authentication Error", e),
+        }
+    };
+}
+
+fn tool_ok(value: serde_json::Value) -> Result<CallToolResult, McpError> {
+    Ok(CallToolResult::success(vec![Content::text(
+        serde_json::to_string_pretty(&value).unwrap(),
+    )]))
+}
+
+fn tool_err(error: &str, details: impl std::fmt::Display) -> Result<CallToolResult, McpError> {
+    Ok(CallToolResult::error(vec![Content::text(
+        json!({"error": error, "details": details.to_string()}).to_string(),
+    )]))
+}
+
+/// Makes `order` (category names, walking order) the store's full aisle order:
+/// reorders existing aisles, adds missing ones (creating categories as needed), and
+/// drops aisles not listed. Returns the refreshed store.
+async fn sync_category_order(
+    client: &TandoorClient,
+    store: &serde_json::Value,
+    order: &[String],
+) -> Result<serde_json::Value, String> {
+    let store_id = store["id"].as_i64().unwrap_or(0);
+    let mut seen = std::collections::HashSet::new();
+    let order: Vec<&str> = order
+        .iter()
+        .map(|n| n.trim())
+        .filter(|n| !n.is_empty() && seen.insert(n.to_lowercase()))
+        .collect();
+
+    let relations: Vec<serde_json::Value> = store["category_to_supermarket"]
+        .as_array()
+        .cloned()
+        .unwrap_or_default();
+    let relation_for = |name: &str| {
+        relations.iter().find(|r| {
+            r["category"]["name"]
+                .as_str()
+                .is_some_and(|n| n.eq_ignore_ascii_case(name))
+        })
+    };
+
+    for (index, name) in order.iter().enumerate() {
+        let result = match relation_for(name) {
+            Some(r) if r["order"].as_i64() == Some(index as i64) => Ok(serde_json::Value::Null),
+            Some(r) => {
+                client
+                    .api_update(
+                        "supermarket-category-relation",
+                        r["id"].as_i64().unwrap_or(0),
+                        json!({"order": index}),
+                    )
+                    .await
+            }
+            // Tandoor reuses an existing category with this name or creates it
+            None => client
+                .api_create(
+                    "supermarket-category-relation",
+                    json!({"category": {"name": name}, "supermarket": store_id, "order": index}),
+                )
+                .await,
+        };
+        result.map_err(|e| format!("aisle '{name}': {e}"))?;
+    }
+    for r in &relations {
+        let name = r["category"]["name"].as_str().unwrap_or("");
+        if !order.iter().any(|n| n.eq_ignore_ascii_case(name)) {
+            client
+                .api_delete(
+                    "supermarket-category-relation",
+                    r["id"].as_i64().unwrap_or(0),
+                )
+                .await
+                .map_err(|e| format!("removing aisle '{name}': {e}"))?;
+        }
+    }
+    client
+        .api_get("supermarket", store_id)
+        .await
+        .map_err(|e| e.to_string())
+}
+
+/// Finds a recipe group on the shopping list by recipe name or group ID. Returns the
+/// raw group and its view.
+async fn find_recipe_group(
+    client: &TandoorClient,
+    target: &NameOrId,
+) -> Result<(serde_json::Value, serde_json::Value), String> {
+    let groups = client
+        .api_list_all("shopping-list-recipe")
+        .await
+        .map_err(|e| e.to_string())?;
+    let entries = client
+        .get_all_shopping_entries()
+        .await
+        .map_err(|e| e.to_string())?;
+    let views: Vec<serde_json::Value> = groups
+        .iter()
+        .map(|g| recipe_group_view(g, &entries))
+        .collect();
+    let view = resolve_named(&views, target, "recipe on the shopping list")?.clone();
+    let group = groups
+        .into_iter()
+        .find(|g| g["id"] == view["id"])
+        .ok_or("recipe group disappeared")?;
+    Ok((group, view))
+}
+
+/// Resolves a named shopping list; a name that matches nothing is created.
+async fn resolve_or_create_shopping_list(
+    client: &TandoorClient,
+    target: &NameOrId,
+) -> Result<crate::client::types::NamedRef, String> {
+    let lists = client
+        .api_list_all("shopping-list")
+        .await
+        .map_err(|e| e.to_string())?;
+    let found = match target {
+        NameOrId::Name(name)
+            if !lists.iter().any(|l| {
+                l["name"]
+                    .as_str()
+                    .unwrap_or("")
+                    .to_lowercase()
+                    .contains(&name.trim().to_lowercase())
+            }) =>
+        {
+            if name.trim().is_empty() {
+                return Err("shopping list name cannot be empty".to_string());
+            }
+            client
+                .api_create(
+                    "shopping-list",
+                    json!({"name": name.trim(), "description": ""}),
+                )
+                .await
+                .map_err(|e| e.to_string())?
+        }
+        _ => resolve_named(&lists, target, "shopping list")?.clone(),
+    };
+    serde_json::from_value(found).map_err(|e| e.to_string())
+}
+
+/// Resolves named shopping lists that must already exist.
+async fn resolve_shopping_lists(
+    client: &TandoorClient,
+    targets: &[NameOrId],
+) -> Result<Vec<crate::client::types::NamedRef>, String> {
+    let lists = client
+        .api_list_all("shopping-list")
+        .await
+        .map_err(|e| e.to_string())?;
+    targets
+        .iter()
+        .map(|t| {
+            let l = resolve_named(&lists, t, "shopping list")?;
+            serde_json::from_value(json!({"id": l["id"], "name": l["name"]}))
+                .map_err(|e| e.to_string())
+        })
+        .collect()
+}
+
 #[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
 pub struct GetShoppingListParams {
     #[serde(default = "default_format")]
     pub format: String,
+    /// Only items on this named shopping list (name or ID)
+    #[serde(default)]
+    pub shopping_list: Option<NameOrId>,
 }
 
 fn default_format() -> String {
@@ -712,6 +1106,9 @@ fn default_format() -> String {
 pub struct CheckShoppingItemsParams {
     /// Items to act on: food names as they appear on the list (e.g. "lemons") or entry IDs
     pub items: Vec<ShoppingRef>,
+    /// true = check off (default), false = uncheck (put back on the list)
+    #[serde(default)]
+    pub checked: Option<bool>,
 }
 
 #[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
@@ -724,6 +1121,15 @@ pub struct UpdateShoppingListItemParams {
     /// New checked/purchased status
     #[serde(default)]
     pub checked: Option<bool>,
+    /// New unit name, e.g. "lb"; "" removes the unit
+    #[serde(default)]
+    pub unit: Option<String>,
+    /// Swap the food, e.g. "Meyer lemons" (reused or created by name)
+    #[serde(default)]
+    pub food: Option<String>,
+    /// Named shopping lists this item should be on (replaces its current lists; [] = none)
+    #[serde(default)]
+    pub shopping_lists: Option<Vec<NameOrId>>,
 }
 
 #[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
@@ -1322,7 +1728,11 @@ pub struct AddMealPlanToShoppingListParams {
 }
 
 #[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
-pub struct GetSupermarketsParams {}
+pub struct GetSupermarketsParams {
+    /// Only stores whose name contains this text
+    #[serde(default)]
+    pub query: Option<String>,
+}
 
 #[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
 pub struct GetUnitConversionsParams {
@@ -1860,6 +2270,13 @@ impl TandoorMcpServer {
             Ok(e) => e,
             Err(e) => return fail(e.to_string()),
         };
+        let list = match params.shopping_list {
+            None => None,
+            Some(target) => match resolve_or_create_shopping_list(&client, &target).await {
+                Ok(l) => Some(l),
+                Err(e) => return fail(e),
+            },
+        };
 
         let mut results = Vec::new();
         let mut errors = Vec::new();
@@ -1915,7 +2332,19 @@ impl TandoorMcpServer {
                 .then(|| find_mergeable_entry(&entries, food_id, unit.as_deref()))
                 .flatten();
             if let Some(entry) = existing {
-                let Some(extra) = parsed.amount else {
+                let mut body = serde_json::Map::new();
+                if let Some(extra) = parsed.amount {
+                    body.insert("amount".to_string(), json!(entry.amount + extra));
+                    body.insert("checked".to_string(), json!(false));
+                }
+                if let Some(list) = &list {
+                    if !entry.shopping_lists.iter().any(|s| s.id == list.id) {
+                        let mut lists = entry.shopping_lists.clone();
+                        lists.push(list.clone());
+                        body.insert("shopping_lists".to_string(), json!(lists));
+                    }
+                }
+                if body.is_empty() {
                     results.push(json!({
                         "id": entry.id,
                         "food": entry.food.name,
@@ -1924,21 +2353,32 @@ impl TandoorMcpServer {
                         "status": "already on list"
                     }));
                     continue;
+                }
+                let status = match parsed.amount {
+                    Some(_) => format!("increased from {}", entry.amount),
+                    None => "added to list".to_string(),
                 };
-                let request = crate::client::types::UpdateShoppingListEntryRequest {
-                    checked: Some(false),
-                    amount: Some(entry.amount + extra),
-                };
-                let previous = entry.amount;
                 let entry_id = entry.id;
-                match client.update_shopping_list_entry(entry_id, request).await {
+                let updated = client
+                    .api_update(
+                        "shopping-list-entry",
+                        entry_id as i64,
+                        serde_json::Value::Object(body),
+                    )
+                    .await
+                    .and_then(|v| {
+                        Ok(serde_json::from_value::<
+                            crate::client::types::ShoppingListEntry,
+                        >(v)?)
+                    });
+                match updated {
                     Ok(updated) => {
                         results.push(json!({
                             "id": updated.id,
                             "food": updated.food.name,
                             "amount": updated.amount,
                             "unit": updated.unit.as_ref().map(|u| &u.name),
-                            "status": format!("increased from {previous}")
+                            "status": status
                         }));
                         if let Some(slot) = entries.iter_mut().find(|e| e.id == entry_id) {
                             *slot = updated;
@@ -1949,8 +2389,14 @@ impl TandoorMcpServer {
                 continue;
             }
 
+            let lists: Vec<_> = list.iter().cloned().collect();
             match client
-                .add_shopping_entry(food_id, unit.as_deref(), parsed.amount.unwrap_or(1.0))
+                .add_shopping_entry(
+                    food_id,
+                    unit.as_deref(),
+                    parsed.amount.unwrap_or(1.0),
+                    &lists,
+                )
                 .await
             {
                 Ok(entry) => {
@@ -2002,7 +2448,15 @@ impl TandoorMcpServer {
         };
 
         match client.get_all_shopping_entries().await {
-            Ok(entries) => {
+            Ok(mut entries) => {
+                if let Some(target) = &params.shopping_list {
+                    let list =
+                        match resolve_shopping_lists(&client, std::slice::from_ref(target)).await {
+                            Ok(mut l) => l.remove(0),
+                            Err(e) => return tool_err("Shopping list not found", e),
+                        };
+                    entries.retain(|e| e.shopping_lists.iter().any(|s| s.id == list.id));
+                }
                 let total = entries.len();
                 let items: Vec<serde_json::Value> = entries
                     .into_iter()
@@ -2015,6 +2469,7 @@ impl TandoorMcpServer {
                             "checked": entry.checked,
                             "category": entry.food.supermarket_category.as_ref().and_then(|c| c.get("name")).cloned(),
                             "from_recipe": entry.list_recipe.is_some(),
+                            "lists": entry.shopping_lists.iter().map(|l| &l.name).collect::<Vec<_>>(),
                             "created": entry.created,
                             "completed": entry.completed
                         })
@@ -2599,7 +3054,7 @@ impl TandoorMcpServer {
 
     // Shopping list management tools
     #[tool(
-        description = "Check off (mark purchased) shopping list items by food name, e.g. items: [\"lemons\", \"milk\"], or by entry ID. Every unchecked line for that food is checked."
+        description = "Check off (mark purchased) shopping list items by food name, e.g. items: [\"lemons\", \"milk\"], or by entry ID. Every line for that food is checked. Pass checked: false to uncheck (put back on the list)."
     )]
     async fn check_shopping_items(
         &self,
@@ -2623,6 +3078,7 @@ impl TandoorMcpServer {
             }
         };
 
+        let target = params.checked.unwrap_or(true);
         let mut updated = Vec::new();
         let mut errors = Vec::new();
         for item in params.items {
@@ -2633,14 +3089,19 @@ impl TandoorMcpServer {
                     continue;
                 }
             };
-            let unchecked: Vec<_> = matched.iter().filter(|e| !e.checked).collect();
-            if unchecked.is_empty() {
-                errors.push(json!({"item": item, "error": "Already checked off"}));
+            let to_change: Vec<_> = matched.iter().filter(|e| e.checked != target).collect();
+            if to_change.is_empty() {
+                let state = if target {
+                    "Already checked off"
+                } else {
+                    "Not checked off"
+                };
+                errors.push(json!({"item": item, "error": state}));
                 continue;
             }
-            for entry in unchecked {
+            for entry in to_change {
                 let request = crate::client::types::UpdateShoppingListEntryRequest {
-                    checked: Some(true),
+                    checked: Some(target),
                     amount: None,
                 };
                 match client.update_shopping_list_entry(entry.id, request).await {
@@ -2660,42 +3121,38 @@ impl TandoorMcpServer {
             serde_json::to_string_pretty(&json!({
                 "updated": updated,
                 "errors": errors,
-                "summary": format!("Checked {} items, {} errors", updated.len(), errors.len())
+                "summary": format!("Updated {} items, {} errors", updated.len(), errors.len())
             }))
             .unwrap(),
         )]))
     }
 
     #[tool(
-        description = "Change one shopping list item's quantity and/or checked status, by food name (e.g. \"lemons\") or entry ID, without affecting other items"
+        description = "Change one shopping list item by food name (e.g. \"lemons\") or entry ID: amount, unit (\"\" removes it), food (swap for another, e.g. \"Meyer lemons\"), checked status, or which named shopping lists it's on. Other items are untouched."
     )]
     async fn update_shopping_list_item(
         &self,
         Parameters(params): Parameters<UpdateShoppingListItemParams>,
     ) -> Result<CallToolResult, McpError> {
-        let client = match self.ensure_authenticated().await {
-            Ok(c) => c,
-            Err(e) => {
-                return Ok(CallToolResult::error(vec![Content::text(
-                    json!({"error": "Authentication Error", "details": e.to_string()}).to_string(),
-                )]));
-            }
-        };
-        let fail = |error: &str, details: String| {
-            Ok(CallToolResult::error(vec![Content::text(
-                json!({"error": error, "details": details}).to_string(),
-            )]))
-        };
-        if params.amount.is_none() && params.checked.is_none() {
-            return fail(
+        let client = auth_or_return!(self);
+        if params.amount.is_none()
+            && params.checked.is_none()
+            && params.unit.is_none()
+            && params.food.is_none()
+            && params.shopping_lists.is_none()
+        {
+            return tool_err(
                 "Nothing to change",
-                "Pass amount and/or checked".to_string(),
+                "Pass amount, unit, food, checked, and/or shopping_lists",
             );
+        }
+        if params.amount.is_some_and(|a| a <= 0.0) {
+            return tool_err("Invalid amount", "amount must be positive");
         }
 
         let entries = match client.get_all_shopping_entries().await {
             Ok(e) => e,
-            Err(e) => return fail("Failed to get shopping list", e.to_string()),
+            Err(e) => return tool_err("Failed to get shopping list", e),
         };
         let entry_id = match match_shopping_entries(&entries, &params.item) {
             Ok(m) if m.len() == 1 => m[0].id,
@@ -2704,30 +3161,83 @@ impl TandoorMcpServer {
                     .iter()
                     .map(|e| json!({"id": e.id, "amount": e.amount, "unit": e.unit.as_ref().map(|u| &u.name), "checked": e.checked}))
                     .collect();
-                return fail(
+                return tool_err(
                     "Item is on the list more than once",
                     format!("Pick one by entry ID: {}", json!(lines)),
                 );
             }
-            Err(e) => return fail("Item not found", e),
+            Err(e) => return tool_err("Item not found", e),
         };
 
-        let request = crate::client::types::UpdateShoppingListEntryRequest {
-            checked: params.checked,
-            amount: params.amount,
-        };
-        match client.update_shopping_list_entry(entry_id, request).await {
-            Ok(entry) => Ok(CallToolResult::success(vec![Content::text(
-                serde_json::to_string_pretty(&json!({
-                    "id": entry.id,
-                    "food": entry.food.name,
-                    "amount": entry.amount,
-                    "unit": entry.unit.as_ref().map(|u| &u.name),
-                    "checked": entry.checked
-                }))
-                .unwrap(),
-            )])),
-            Err(e) => fail("Failed to update shopping list item", e.to_string()),
+        let mut body = serde_json::Map::new();
+        if let Some(amount) = params.amount {
+            body.insert("amount".to_string(), json!(amount));
+        }
+        if let Some(checked) = params.checked {
+            body.insert("checked".to_string(), json!(checked));
+        }
+        if let Some(unit) = params.unit {
+            let value = if unit.trim().is_empty() {
+                serde_json::Value::Null
+            } else {
+                let units = client
+                    .get_units()
+                    .await
+                    .map(|u| u.results)
+                    .unwrap_or_default();
+                json!({"name": resolve_unit_name(&unit, &units)})
+            };
+            body.insert("unit".to_string(), value);
+        }
+        if let Some(food) = params.food.filter(|f| !f.trim().is_empty()) {
+            let food_id = match find_food_by_name(&client, &food).await {
+                Ok((Some(id), _)) => id,
+                Ok((None, _)) => {
+                    let request = crate::client::types::NewFoodRequest {
+                        name: food.trim().to_string(),
+                        food_onhand: false,
+                        supermarket_category: None,
+                    };
+                    match client.create_food(request).await {
+                        Ok(f) => f.id,
+                        Err(e) => return tool_err("Failed to create food", e),
+                    }
+                }
+                Err(e) => return tool_err("Failed to look up food", e),
+            };
+            body.insert("food".to_string(), json!(food_id));
+        }
+        if let Some(targets) = params.shopping_lists {
+            match resolve_shopping_lists(&client, &targets).await {
+                Ok(lists) => {
+                    body.insert("shopping_lists".to_string(), json!(lists));
+                }
+                Err(e) => return tool_err("Shopping list not found", e),
+            }
+        }
+
+        let updated = client
+            .api_update(
+                "shopping-list-entry",
+                entry_id as i64,
+                serde_json::Value::Object(body),
+            )
+            .await
+            .and_then(|v| {
+                Ok(serde_json::from_value::<
+                    crate::client::types::ShoppingListEntry,
+                >(v)?)
+            });
+        match updated {
+            Ok(entry) => tool_ok(json!({
+                "id": entry.id,
+                "food": entry.food.name,
+                "amount": entry.amount,
+                "unit": entry.unit.as_ref().map(|u| &u.name),
+                "checked": entry.checked,
+                "lists": entry.shopping_lists.iter().map(|l| &l.name).collect::<Vec<_>>()
+            })),
+            Err(e) => tool_err("Failed to update shopping list item", e),
         }
     }
 
@@ -4055,39 +4565,527 @@ impl TandoorMcpServer {
     }
 
     #[tool(
-        description = "List supermarkets/stores configured in Tandoor (used for organizing shopping lists by store)"
+        description = "List supermarkets/stores with their aisle (category) order. Optional `query` filters by name."
     )]
     async fn get_supermarkets(
         &self,
-        Parameters(_params): Parameters<GetSupermarketsParams>,
+        Parameters(params): Parameters<GetSupermarketsParams>,
     ) -> Result<CallToolResult, McpError> {
-        let client = match self.ensure_authenticated().await {
-            Ok(c) => c,
-            Err(e) => {
-                return Ok(CallToolResult::error(vec![Content::text(
-                    json!({"error": "Authentication Error", "details": e.to_string()}).to_string(),
-                )]));
-            }
-        };
-
-        match client.get_supermarkets().await {
-            Ok(response) => {
-                let stores: Vec<serde_json::Value> = response
-                    .results
-                    .into_iter()
-                    .map(|s| json!({"id": s.id, "name": s.name, "description": s.description}))
+        let client = auth_or_return!(self);
+        match client.api_list_all("supermarket").await {
+            Ok(stores) => {
+                let query = params.query.unwrap_or_default().to_lowercase();
+                let stores: Vec<_> = stores
+                    .iter()
+                    .filter(|s| {
+                        s["name"]
+                            .as_str()
+                            .unwrap_or("")
+                            .to_lowercase()
+                            .contains(&query)
+                    })
+                    .map(supermarket_view)
                     .collect();
-                Ok(CallToolResult::success(vec![Content::text(
-                    serde_json::to_string_pretty(
-                        &json!({"supermarkets": stores, "total": response.count}),
-                    )
-                    .unwrap(),
-                )]))
+                tool_ok(json!({"total": stores.len(), "supermarkets": stores}))
             }
-            Err(e) => Ok(CallToolResult::error(vec![Content::text(
-                json!({"error": "Failed to get supermarkets", "details": e.to_string()})
-                    .to_string(),
-            )])),
+            Err(e) => tool_err("Failed to get supermarkets", e),
+        }
+    }
+
+    #[tool(description = "Create a supermarket/store, optionally with its aisle (category) order")]
+    async fn create_supermarket(
+        &self,
+        Parameters(params): Parameters<CreateSupermarketParams>,
+    ) -> Result<CallToolResult, McpError> {
+        let client = auth_or_return!(self);
+        if params.name.trim().is_empty() {
+            return tool_err("Invalid supermarket", "name cannot be empty");
+        }
+        let existing = match client.api_list_all("supermarket").await {
+            Ok(s) => s,
+            Err(e) => return tool_err("Failed to load supermarkets", e),
+        };
+        if existing.iter().any(|s| {
+            s["name"]
+                .as_str()
+                .is_some_and(|n| n.eq_ignore_ascii_case(params.name.trim()))
+        }) {
+            return tool_err(
+                "Supermarket already exists",
+                format!("'{}' exists; use update_supermarket", params.name.trim()),
+            );
+        }
+        let store = match client
+            .api_create(
+                "supermarket",
+                json!({"name": params.name.trim(), "description": params.description}),
+            )
+            .await
+        {
+            Ok(s) => s,
+            Err(e) => return tool_err("Failed to create supermarket", e),
+        };
+        let store = match params.category_order {
+            Some(order) => match sync_category_order(&client, &store, &order).await {
+                Ok(s) => s,
+                Err(e) => {
+                    return tool_err("Created the supermarket but failed to set its aisles", e)
+                }
+            },
+            None => store,
+        };
+        tool_ok(json!({"created": supermarket_view(&store)}))
+    }
+
+    #[tool(
+        description = "Rename or describe a supermarket, and/or set its aisle order. `category_order` is the FULL walking order of category names; categories not listed are removed from this store (not deleted)."
+    )]
+    async fn update_supermarket(
+        &self,
+        Parameters(params): Parameters<UpdateSupermarketParams>,
+    ) -> Result<CallToolResult, McpError> {
+        let client = auth_or_return!(self);
+        let stores = match client.api_list_all("supermarket").await {
+            Ok(s) => s,
+            Err(e) => return tool_err("Failed to load supermarkets", e),
+        };
+        let store = match resolve_named(&stores, &params.supermarket, "supermarket") {
+            Ok(s) => s.clone(),
+            Err(e) => return tool_err("Supermarket not found", e),
+        };
+        let id = store["id"].as_i64().unwrap_or(0);
+
+        let mut body = serde_json::Map::new();
+        if let Some(name) = params.name.filter(|n| !n.trim().is_empty()) {
+            body.insert("name".to_string(), json!(name.trim()));
+        }
+        if let Some(description) = params.description {
+            body.insert("description".to_string(), json!(description));
+        }
+        if body.is_empty() && params.category_order.is_none() {
+            return tool_err(
+                "Nothing to change",
+                "Pass name, description, and/or category_order",
+            );
+        }
+        let mut store = store;
+        if !body.is_empty() {
+            store = match client
+                .api_update("supermarket", id, serde_json::Value::Object(body))
+                .await
+            {
+                Ok(s) => s,
+                Err(e) => return tool_err("Failed to update supermarket", e),
+            };
+        }
+        if let Some(order) = params.category_order {
+            store = match sync_category_order(&client, &store, &order).await {
+                Ok(s) => s,
+                Err(e) => return tool_err("Failed to set aisle order", e),
+            };
+        }
+        tool_ok(json!({"updated": supermarket_view(&store)}))
+    }
+
+    #[tool(
+        description = "Delete a supermarket/store and its aisle order. Permanent — confirm with the user first. Categories and foods are kept."
+    )]
+    async fn delete_supermarket(
+        &self,
+        Parameters(params): Parameters<DeleteSupermarketParams>,
+    ) -> Result<CallToolResult, McpError> {
+        let client = auth_or_return!(self);
+        let stores = match client.api_list_all("supermarket").await {
+            Ok(s) => s,
+            Err(e) => return tool_err("Failed to load supermarkets", e),
+        };
+        let store = match resolve_named(&stores, &params.supermarket, "supermarket") {
+            Ok(s) => s,
+            Err(e) => return tool_err("Supermarket not found", e),
+        };
+        match client
+            .api_delete("supermarket", store["id"].as_i64().unwrap_or(0))
+            .await
+        {
+            Ok(()) => tool_ok(json!({"deleted": {"id": store["id"], "name": store["name"]}})),
+            Err(e) => tool_err("Failed to delete supermarket", e),
+        }
+    }
+
+    #[tool(
+        description = "List supermarket categories (aisles/sections such as Produce or Dairy) that foods are grouped by on the shopping list"
+    )]
+    async fn get_supermarket_categories(
+        &self,
+        Parameters(_params): Parameters<EmptyParams>,
+    ) -> Result<CallToolResult, McpError> {
+        let client = auth_or_return!(self);
+        match client.api_list_all("supermarket-category").await {
+            Ok(categories) => {
+                let categories: Vec<_> = categories.iter().map(category_view).collect();
+                tool_ok(json!({"total": categories.len(), "categories": categories}))
+            }
+            Err(e) => tool_err("Failed to get categories", e),
+        }
+    }
+
+    #[tool(description = "Create a supermarket category (aisle/section), e.g. \"Bulk Bins\"")]
+    async fn create_supermarket_category(
+        &self,
+        Parameters(params): Parameters<CreateSupermarketCategoryParams>,
+    ) -> Result<CallToolResult, McpError> {
+        let client = auth_or_return!(self);
+        let name = params.name.trim();
+        if name.is_empty() {
+            return tool_err("Invalid category", "name cannot be empty");
+        }
+        let existing = match client.api_list_all("supermarket-category").await {
+            Ok(c) => c,
+            Err(e) => return tool_err("Failed to load categories", e),
+        };
+        if let Some(c) = existing.iter().find(|c| {
+            c["name"]
+                .as_str()
+                .is_some_and(|n| n.eq_ignore_ascii_case(name))
+        }) {
+            return tool_err(
+                "Category already exists",
+                format!(
+                    "'{}' (ID {}) exists; use update_supermarket_category",
+                    c["name"].as_str().unwrap_or(""),
+                    c["id"]
+                ),
+            );
+        }
+        match client
+            .api_create(
+                "supermarket-category",
+                json!({"name": name, "description": params.description}),
+            )
+            .await
+        {
+            Ok(c) => tool_ok(json!({"created": category_view(&c)})),
+            Err(e) => tool_err("Failed to create category", e),
+        }
+    }
+
+    #[tool(description = "Rename or describe a supermarket category (aisle/section)")]
+    async fn update_supermarket_category(
+        &self,
+        Parameters(params): Parameters<UpdateSupermarketCategoryParams>,
+    ) -> Result<CallToolResult, McpError> {
+        let client = auth_or_return!(self);
+        let mut body = serde_json::Map::new();
+        if let Some(name) = params.name.filter(|n| !n.trim().is_empty()) {
+            body.insert("name".to_string(), json!(name.trim()));
+        }
+        if let Some(description) = params.description {
+            body.insert("description".to_string(), json!(description));
+        }
+        if body.is_empty() {
+            return tool_err("Nothing to change", "Pass name and/or description");
+        }
+        let categories = match client.api_list_all("supermarket-category").await {
+            Ok(c) => c,
+            Err(e) => return tool_err("Failed to load categories", e),
+        };
+        let category = match resolve_named(&categories, &params.category, "category") {
+            Ok(c) => c,
+            Err(e) => return tool_err("Category not found", e),
+        };
+        match client
+            .api_update(
+                "supermarket-category",
+                category["id"].as_i64().unwrap_or(0),
+                serde_json::Value::Object(body),
+            )
+            .await
+        {
+            Ok(c) => tool_ok(json!({"updated": category_view(&c)})),
+            Err(e) => tool_err("Failed to update category", e),
+        }
+    }
+
+    #[tool(
+        description = "Delete a supermarket category (aisle/section). Permanent — confirm with the user first. Foods in it become uncategorized and it is removed from every store's aisle order."
+    )]
+    async fn delete_supermarket_category(
+        &self,
+        Parameters(params): Parameters<DeleteSupermarketCategoryParams>,
+    ) -> Result<CallToolResult, McpError> {
+        let client = auth_or_return!(self);
+        let categories = match client.api_list_all("supermarket-category").await {
+            Ok(c) => c,
+            Err(e) => return tool_err("Failed to load categories", e),
+        };
+        let category = match resolve_named(&categories, &params.category, "category") {
+            Ok(c) => c,
+            Err(e) => return tool_err("Category not found", e),
+        };
+        match client
+            .api_delete("supermarket-category", category["id"].as_i64().unwrap_or(0))
+            .await
+        {
+            Ok(()) => tool_ok(json!({"deleted": {"id": category["id"], "name": category["name"]}})),
+            Err(e) => tool_err("Failed to delete category", e),
+        }
+    }
+
+    #[tool(
+        description = "Put foods in a supermarket category (aisle), e.g. foods: [\"lemons\", \"parsley\"], category: \"Produce\", so they group together on the shopping list. The category is created if new; omit it to clear."
+    )]
+    async fn set_food_category(
+        &self,
+        Parameters(params): Parameters<SetFoodCategoryParams>,
+    ) -> Result<CallToolResult, McpError> {
+        let client = auth_or_return!(self);
+        let category = params
+            .category
+            .as_deref()
+            .map(str::trim)
+            .filter(|c| !c.is_empty())
+            .map(|name| json!({"name": name}));
+        let mut updated = Vec::new();
+        let mut errors = Vec::new();
+        for name in params.foods {
+            let id = match find_food_by_name(&client, &name).await {
+                Ok((Some(id), _)) => id,
+                Ok((None, similar)) => {
+                    errors.push(
+                        json!({"food": name, "error": "Food not found", "similar_foods": similar}),
+                    );
+                    continue;
+                }
+                Err(e) => {
+                    errors.push(json!({"food": name, "error": e.to_string()}));
+                    continue;
+                }
+            };
+            match client
+                .api_update(
+                    "food",
+                    id as i64,
+                    json!({"supermarket_category": category.clone()}),
+                )
+                .await
+            {
+                Ok(food) => updated.push(json!({
+                    "food": food["name"],
+                    "category": food["supermarket_category"]["name"]
+                })),
+                Err(e) => errors.push(json!({"food": name, "error": e.to_string()})),
+            }
+        }
+        tool_ok(json!({"updated": updated, "errors": errors}))
+    }
+
+    #[tool(
+        description = "List named shopping lists (e.g. \"Costco\", \"Party\"). Items can be on several lists; see add_to_shopping_list's shopping_list option."
+    )]
+    async fn get_shopping_lists(
+        &self,
+        Parameters(_params): Parameters<EmptyParams>,
+    ) -> Result<CallToolResult, McpError> {
+        let client = auth_or_return!(self);
+        let lists = match client.api_list_all("shopping-list").await {
+            Ok(l) => l,
+            Err(e) => return tool_err("Failed to get shopping lists", e),
+        };
+        let entries = client.get_all_shopping_entries().await.unwrap_or_default();
+        let lists: Vec<_> = lists
+            .iter()
+            .map(|l| {
+                let id = l["id"].as_i64();
+                let mut view = shopping_list_view(l);
+                view["unchecked_items"] = json!(entries
+                    .iter()
+                    .filter(
+                        |e| !e.checked && e.shopping_lists.iter().any(|s| Some(s.id as i64) == id)
+                    )
+                    .count());
+                view
+            })
+            .collect();
+        tool_ok(json!({"total": lists.len(), "shopping_lists": lists}))
+    }
+
+    #[tool(description = "Create a named shopping list, e.g. \"Costco\" or \"Party\"")]
+    async fn create_shopping_list(
+        &self,
+        Parameters(params): Parameters<CreateShoppingListParams>,
+    ) -> Result<CallToolResult, McpError> {
+        let client = auth_or_return!(self);
+        let name = params.name.trim();
+        if name.is_empty() {
+            return tool_err("Invalid shopping list", "name cannot be empty");
+        }
+        let existing = match client.api_list_all("shopping-list").await {
+            Ok(l) => l,
+            Err(e) => return tool_err("Failed to load shopping lists", e),
+        };
+        if existing.iter().any(|l| {
+            l["name"]
+                .as_str()
+                .is_some_and(|n| n.eq_ignore_ascii_case(name))
+        }) {
+            return tool_err(
+                "Shopping list already exists",
+                format!("'{name}' exists; use update_shopping_list"),
+            );
+        }
+        let mut body = json!({"name": name, "description": params.description.unwrap_or_default()});
+        if let Some(color) = params.color {
+            body["color"] = json!(color);
+        }
+        match client.api_create("shopping-list", body).await {
+            Ok(l) => tool_ok(json!({"created": shopping_list_view(&l)})),
+            Err(e) => tool_err("Failed to create shopping list", e),
+        }
+    }
+
+    #[tool(description = "Rename a named shopping list or change its description/color")]
+    async fn update_shopping_list(
+        &self,
+        Parameters(params): Parameters<UpdateShoppingListParams>,
+    ) -> Result<CallToolResult, McpError> {
+        let client = auth_or_return!(self);
+        let mut body = serde_json::Map::new();
+        if let Some(name) = params.name.filter(|n| !n.trim().is_empty()) {
+            body.insert("name".to_string(), json!(name.trim()));
+        }
+        if let Some(description) = params.description {
+            body.insert("description".to_string(), json!(description));
+        }
+        if let Some(color) = params.color {
+            body.insert("color".to_string(), json!(color));
+        }
+        if body.is_empty() {
+            return tool_err("Nothing to change", "Pass name, description, and/or color");
+        }
+        let lists = match client.api_list_all("shopping-list").await {
+            Ok(l) => l,
+            Err(e) => return tool_err("Failed to load shopping lists", e),
+        };
+        let list = match resolve_named(&lists, &params.shopping_list, "shopping list") {
+            Ok(l) => l,
+            Err(e) => return tool_err("Shopping list not found", e),
+        };
+        match client
+            .api_update(
+                "shopping-list",
+                list["id"].as_i64().unwrap_or(0),
+                serde_json::Value::Object(body),
+            )
+            .await
+        {
+            Ok(l) => tool_ok(json!({"updated": shopping_list_view(&l)})),
+            Err(e) => tool_err("Failed to update shopping list", e),
+        }
+    }
+
+    #[tool(
+        description = "Delete a named shopping list. Permanent — confirm with the user first. Items on it stay on the main shopping list, just no longer tagged with this list."
+    )]
+    async fn delete_shopping_list(
+        &self,
+        Parameters(params): Parameters<DeleteShoppingListParams>,
+    ) -> Result<CallToolResult, McpError> {
+        let client = auth_or_return!(self);
+        let lists = match client.api_list_all("shopping-list").await {
+            Ok(l) => l,
+            Err(e) => return tool_err("Failed to load shopping lists", e),
+        };
+        let list = match resolve_named(&lists, &params.shopping_list, "shopping list") {
+            Ok(l) => l,
+            Err(e) => return tool_err("Shopping list not found", e),
+        };
+        match client
+            .api_delete("shopping-list", list["id"].as_i64().unwrap_or(0))
+            .await
+        {
+            Ok(()) => tool_ok(json!({"deleted": {"id": list["id"], "name": list["name"]}})),
+            Err(e) => tool_err("Failed to delete shopping list", e),
+        }
+    }
+
+    #[tool(
+        description = "List the recipes (and meal plans) on the shopping list, with their servings and the items each one added"
+    )]
+    async fn get_shopping_list_recipes(
+        &self,
+        Parameters(_params): Parameters<EmptyParams>,
+    ) -> Result<CallToolResult, McpError> {
+        let client = auth_or_return!(self);
+        let groups = match client.api_list_all("shopping-list-recipe").await {
+            Ok(g) => g,
+            Err(e) => return tool_err("Failed to get shopping list recipes", e),
+        };
+        let entries = match client.get_all_shopping_entries().await {
+            Ok(e) => e,
+            Err(e) => return tool_err("Failed to get shopping list", e),
+        };
+        let groups: Vec<_> = groups
+            .iter()
+            .map(|g| recipe_group_view(g, &entries))
+            .collect();
+        tool_ok(json!({"total": groups.len(), "recipes": groups}))
+    }
+
+    #[tool(
+        description = "Change the servings of a recipe on the shopping list; its items are rescaled (e.g. 2 → 6 servings triples them). Other items are untouched."
+    )]
+    async fn update_shopping_list_recipe(
+        &self,
+        Parameters(params): Parameters<UpdateShoppingListRecipeParams>,
+    ) -> Result<CallToolResult, McpError> {
+        let client = auth_or_return!(self);
+        if params.servings <= 0.0 {
+            return tool_err(
+                "Invalid servings",
+                "servings must be positive; use remove_recipe_from_shopping_list to remove it",
+            );
+        }
+        let (group, _) = match find_recipe_group(&client, &params.recipe).await {
+            Ok(g) => g,
+            Err(e) => return tool_err("Recipe not on shopping list", e),
+        };
+        let id = group["id"].as_i64().unwrap_or(0);
+        if let Err(e) = client
+            .api_update(
+                "shopping-list-recipe",
+                id,
+                json!({"servings": params.servings}),
+            )
+            .await
+        {
+            return tool_err("Failed to update servings", e);
+        }
+        let entries = client.get_all_shopping_entries().await.unwrap_or_default();
+        let group = client
+            .api_get("shopping-list-recipe", id)
+            .await
+            .unwrap_or(group);
+        tool_ok(json!({"updated": recipe_group_view(&group, &entries)}))
+    }
+
+    #[tool(
+        description = "Remove a recipe from the shopping list together with all the items it added. Items you added yourself are kept. Confirm with the user first."
+    )]
+    async fn remove_recipe_from_shopping_list(
+        &self,
+        Parameters(params): Parameters<RemoveRecipeFromShoppingListParams>,
+    ) -> Result<CallToolResult, McpError> {
+        let client = auth_or_return!(self);
+        let (group, view) = match find_recipe_group(&client, &params.recipe).await {
+            Ok(g) => g,
+            Err(e) => return tool_err("Recipe not on shopping list", e),
+        };
+        match client
+            .api_delete("shopping-list-recipe", group["id"].as_i64().unwrap_or(0))
+            .await
+        {
+            Ok(()) => tool_ok(json!({"removed": view})),
+            Err(e) => tool_err("Failed to remove recipe from shopping list", e),
         }
     }
 
@@ -4166,16 +5164,22 @@ impl ServerHandler for TandoorMcpServer {
                 READ-ONLY tools (safe to call freely): search_recipes, get_recipe_details, \
                 get_shopping_list, search_foods, get_keywords, get_units, get_meal_plans, \
                 get_meal_types, get_cook_log, suggest_from_inventory, get_recipe_books, \
-                get_recipe_book_entries, get_supermarkets, get_unit_conversions, find_duplicate_foods. \
+                get_recipe_book_entries, get_supermarkets, get_unit_conversions, find_duplicate_foods, \
+                get_shopping_lists, get_shopping_list_recipes, get_supermarket_categories. \
                 WRITE tools (modify data — confirm intent before calling): create_recipe, \
                 import_recipe_from_url, update_recipe, add_to_shopping_list, \
                 check_shopping_items, update_shopping_list_item, clear_shopping_list, \
                 update_pantry, create_meal_plan, update_meal_plan, log_cooked_recipe, \
                 create_recipe_book, update_recipe_book, add_to_recipe_book, \
-                add_meal_plan_to_shopping_list, add_recipe_to_shopping_list. \
+                add_meal_plan_to_shopping_list, add_recipe_to_shopping_list, \
+                create_shopping_list, update_shopping_list, update_shopping_list_recipe, \
+                create_supermarket, update_supermarket, create_supermarket_category, \
+                update_supermarket_category, set_food_category. \
                 DESTRUCTIVE tools (permanent delete — always confirm with user first): \
                 delete_recipe, delete_meal_plan, delete_recipe_book, remove_from_recipe_book, \
-                remove_from_shopping_list, merge_foods (deletes the source food)."
+                remove_from_shopping_list, merge_foods (deletes the source food), \
+                delete_shopping_list, delete_supermarket, delete_supermarket_category, \
+                remove_recipe_from_shopping_list."
                     .to_string(),
             ),
         }
@@ -4715,5 +5719,52 @@ mod tests {
         let items: Vec<ShoppingItemInput> =
             serde_json::from_value(json!(["3 lemons", {"name": "milk", "amount": 2}])).unwrap();
         assert!(matches!(&items[1], ShoppingItemInput::Structured(i) if i.food == "milk"));
+    }
+
+    #[test]
+    fn resolve_named_exact_then_unique_partial() {
+        let items = vec![
+            json!({"id": 1, "name": "Costco"}),
+            json!({"id": 2, "name": "Trader Joe's"}),
+            json!({"id": 3, "name": "Costco Business"}),
+        ];
+        let id =
+            |t: NameOrId| resolve_named(&items, &t, "store").map(|v| v["id"].as_i64().unwrap());
+        assert_eq!(id(NameOrId::Name("costco".into())), Ok(1)); // exact beats partial
+        assert_eq!(id(NameOrId::Name("trader".into())), Ok(2));
+        assert_eq!(id(NameOrId::Id(3)), Ok(3));
+        assert!(id(NameOrId::Name("co".into()))
+            .unwrap_err()
+            .contains("several"));
+        assert!(id(NameOrId::Name("aldi".into()))
+            .unwrap_err()
+            .contains("No store"));
+    }
+
+    #[test]
+    fn supermarket_view_orders_aisles() {
+        let store = json!({
+            "id": 5, "name": "Store", "description": null,
+            "category_to_supermarket": [
+                {"id": 9, "order": 2, "category": {"name": "Dairy"}},
+                {"id": 8, "order": 0, "category": {"name": "Produce"}},
+                {"id": 7, "order": 1, "category": {"name": "Bakery"}}
+            ]
+        });
+        assert_eq!(
+            supermarket_view(&store)["category_order"],
+            json!(["Produce", "Bakery", "Dairy"])
+        );
+    }
+
+    #[test]
+    fn recipe_group_view_uses_recipe_name_and_its_items() {
+        let entries = shopping_entries(); // entry 2 belongs to group 5
+        let group = json!({"id": 5, "name": "", "recipe": 1, "mealplan": null, "servings": 4.0,
+                           "recipe_data": {"name": "Lemon Chicken"}});
+        let view = recipe_group_view(&group, &entries);
+        assert_eq!(view["name"], "Lemon Chicken");
+        assert_eq!(view["items"].as_array().unwrap().len(), 1);
+        assert_eq!(view["items"][0]["food"], "Lemon");
     }
 }

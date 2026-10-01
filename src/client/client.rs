@@ -156,7 +156,7 @@ impl TandoorClient {
             .await
             .map_err(|e| {
                 tracing::error!("Network error searching recipes: {}", e);
-                anyhow::anyhow!("Failed to connect to Tandoor API: {}", e)
+                anyhow::anyhow!("Failed to connect to Tandoor API: {e}")
             })?;
 
         let status = response.status();
@@ -172,12 +172,12 @@ impl TandoorClient {
                 status,
                 error_body
             );
-            anyhow::bail!("Failed to search recipes: {} - {}", status, error_body);
+            anyhow::bail!("Failed to search recipes: {status} - {error_body}");
         }
 
         let recipes = response.json().await.map_err(|e| {
             tracing::error!("Failed to parse recipe search response: {}", e);
-            anyhow::anyhow!("Invalid response format: {}", e)
+            anyhow::anyhow!("Invalid response format: {e}")
         })?;
 
         tracing::debug!("Recipe search successful");
@@ -198,7 +198,7 @@ impl TandoorClient {
             .await
             .map_err(|e| {
                 tracing::error!("Network error getting recipe {}: {}", id, e);
-                anyhow::anyhow!("Failed to connect to Tandoor API: {}", e)
+                anyhow::anyhow!("Failed to connect to Tandoor API: {e}")
             })?;
 
         let status = response.status();
@@ -217,15 +217,15 @@ impl TandoorClient {
             );
 
             match status.as_u16() {
-                404 => anyhow::bail!("Recipe with ID {} not found", id),
-                403 => anyhow::bail!("Access denied to recipe {}", id),
-                _ => anyhow::bail!("Failed to get recipe: {} - {}", status, error_body),
+                404 => anyhow::bail!("Recipe with ID {id} not found"),
+                403 => anyhow::bail!("Access denied to recipe {id}"),
+                _ => anyhow::bail!("Failed to get recipe: {status} - {error_body}"),
             }
         }
 
         let recipe = response.json().await.map_err(|e| {
             tracing::error!("Failed to parse recipe response: {}", e);
-            anyhow::anyhow!("Invalid response format: {}", e)
+            anyhow::anyhow!("Invalid response format: {e}")
         })?;
 
         tracing::debug!("Successfully retrieved recipe: {}", id);
@@ -253,7 +253,7 @@ impl TandoorClient {
             .await
             .map_err(|e| {
                 tracing::error!("Network error creating recipe: {}", e);
-                anyhow::anyhow!("Failed to connect to Tandoor API: {}", e)
+                anyhow::anyhow!("Failed to connect to Tandoor API: {e}")
             })?;
 
         let status = response.status();
@@ -270,12 +270,12 @@ impl TandoorClient {
                 status,
                 error_body
             );
-            anyhow::bail!("Failed to create recipe: {} - {}", status, error_body);
+            anyhow::bail!("Failed to create recipe: {status} - {error_body}");
         }
 
         let recipe: Recipe = response.json().await.map_err(|e| {
             tracing::error!("Failed to parse create recipe response: {}", e);
-            anyhow::anyhow!("Invalid response format: {}", e)
+            anyhow::anyhow!("Invalid response format: {e}")
         })?;
 
         tracing::info!(
@@ -317,7 +317,7 @@ impl TandoorClient {
             .await
             .map_err(|e| {
                 tracing::error!("Network error searching foods: {}", e);
-                anyhow::anyhow!("Failed to connect to Tandoor API: {}", e)
+                anyhow::anyhow!("Failed to connect to Tandoor API: {e}")
             })?;
 
         let status = response.status();
@@ -334,12 +334,12 @@ impl TandoorClient {
                 status,
                 error_body
             );
-            anyhow::bail!("Failed to search foods: {} - {}", status, error_body);
+            anyhow::bail!("Failed to search foods: {status} - {error_body}");
         }
 
         let foods: PaginatedResponse<Food> = response.json().await.map_err(|e| {
             tracing::error!("Failed to parse food search response: {}", e);
-            anyhow::anyhow!("Invalid response format: {}", e)
+            anyhow::anyhow!("Invalid response format: {e}")
         })?;
 
         tracing::debug!("Food search successful, found {} results", foods.count);
@@ -359,15 +359,115 @@ impl TandoorClient {
             .json(&request)
             .send()
             .await
-            .map_err(|e| anyhow::anyhow!("Failed to connect to Tandoor API: {}", e))?;
+            .map_err(|e| anyhow::anyhow!("Failed to connect to Tandoor API: {e}"))?;
 
         let status = response.status();
         if !status.is_success() {
             let error_body = response.text().await.unwrap_or_default();
-            anyhow::bail!("Failed to create food: {} - {}", status, error_body);
+            anyhow::bail!("Failed to create food: {status} - {error_body}");
         }
         let food = response.json().await?;
         Ok(food)
+    }
+
+    pub async fn get_food(&self, id: i32) -> Result<Food> {
+        let auth_header = self.get_auth_header()?;
+        let url = format!("{}/api/food/{}/", self.base_url, id);
+
+        let response = self
+            .client
+            .get(&url)
+            .header("Authorization", auth_header)
+            .send()
+            .await
+            .map_err(|e| anyhow::anyhow!("Failed to connect to Tandoor API: {e}"))?;
+
+        let status = response.status();
+        if !status.is_success() {
+            let error_body = response.text().await.unwrap_or_default();
+            anyhow::bail!("Failed to get food {id}: {status} - {error_body}");
+        }
+        let food = response.json().await?;
+        Ok(food)
+    }
+
+    /// Every food in the space, following pagination.
+    pub async fn list_all_foods(&self) -> Result<Vec<Food>> {
+        let auth_header = self.get_auth_header()?;
+        let mut url = Some(format!("{}/api/food/?page_size=100", self.base_url));
+        let mut foods = Vec::new();
+
+        while let Some(page_url) = url {
+            let response = self
+                .client
+                .get(&page_url)
+                .header("Authorization", &auth_header)
+                .send()
+                .await
+                .map_err(|e| anyhow::anyhow!("Failed to connect to Tandoor API: {e}"))?;
+
+            let status = response.status();
+            if !status.is_success() {
+                let error_body = response.text().await.unwrap_or_default();
+                anyhow::bail!("Failed to list foods: {status} - {error_body}");
+            }
+            let page: PaginatedResponse<Food> = response.json().await?;
+            foods.extend(page.results);
+            url = page.next;
+        }
+        Ok(foods)
+    }
+
+    /// Merge `source` into `target`: every recipe, shopping entry, etc. that used the
+    /// source food is moved to the target, and the source food is deleted.
+    pub async fn merge_food(&self, source: i32, target: i32) -> Result<()> {
+        let auth_header = self.get_auth_header()?;
+        let url = format!("{}/api/food/{}/merge/{}/", self.base_url, source, target);
+
+        let response = self
+            .client
+            .put(&url)
+            .header("Authorization", auth_header)
+            .send()
+            .await
+            .map_err(|e| anyhow::anyhow!("Failed to connect to Tandoor API: {e}"))?;
+
+        let status = response.status();
+        if !status.is_success() {
+            let error_body = response.text().await.unwrap_or_default();
+            anyhow::bail!("Failed to merge foods: {status} - {error_body}");
+        }
+        Ok(())
+    }
+
+    /// Add a recipe to the shopping list through Tandoor's recipe shopping endpoint, so
+    /// entries are linked to the recipe and scaled to `servings`. Only the given
+    /// ingredient IDs are added (must be non-empty: an empty list adds everything).
+    pub async fn add_recipe_to_shopping_list(
+        &self,
+        recipe_id: i32,
+        servings: i32,
+        ingredient_ids: &[i32],
+    ) -> Result<()> {
+        anyhow::ensure!(!ingredient_ids.is_empty(), "No ingredients to add");
+        let auth_header = self.get_auth_header()?;
+        let url = format!("{}/api/recipe/{}/shopping/", self.base_url, recipe_id);
+
+        let response = self
+            .client
+            .put(&url)
+            .header("Authorization", auth_header)
+            .json(&serde_json::json!({"servings": servings, "ingredients": ingredient_ids}))
+            .send()
+            .await
+            .map_err(|e| anyhow::anyhow!("Failed to connect to Tandoor API: {e}"))?;
+
+        let status = response.status();
+        if !status.is_success() {
+            let error_body = response.text().await.unwrap_or_default();
+            anyhow::bail!("Failed to add recipe to shopping list: {status} - {error_body}");
+        }
+        Ok(())
     }
 
     pub async fn update_food_availability(&self, food_id: i32, available: bool) -> Result<Food> {
@@ -408,7 +508,7 @@ impl TandoorClient {
             .await
             .map_err(|e| {
                 tracing::error!("Network error getting shopping list: {}", e);
-                anyhow::anyhow!("Failed to connect to Tandoor API: {}", e)
+                anyhow::anyhow!("Failed to connect to Tandoor API: {e}")
             })?;
 
         let status = response.status();
@@ -424,13 +524,13 @@ impl TandoorClient {
                 status,
                 error_body
             );
-            anyhow::bail!("Failed to get shopping list: {} - {}", status, error_body);
+            anyhow::bail!("Failed to get shopping list: {status} - {error_body}");
         }
 
         // Handle both paginated response and simple array response
         let response_text = response.text().await.map_err(|e| {
             tracing::error!("Failed to read shopping list response: {}", e);
-            anyhow::anyhow!("Failed to read response: {}", e)
+            anyhow::anyhow!("Failed to read response: {e}")
         })?;
 
         let shopping_list: PaginatedResponse<ShoppingListEntry> =
@@ -439,7 +539,7 @@ impl TandoorClient {
                 let entries: Vec<ShoppingListEntry> = serde_json::from_str(&response_text)
                     .map_err(|e| {
                         tracing::error!("Failed to parse shopping list array response: {}", e);
-                        anyhow::anyhow!("Invalid array response format: {}", e)
+                        anyhow::anyhow!("Invalid array response format: {e}")
                     })?;
                 PaginatedResponse {
                     count: entries.len() as i32,
@@ -451,7 +551,7 @@ impl TandoorClient {
                 // Paginated response
                 serde_json::from_str(&response_text).map_err(|e| {
                     tracing::error!("Failed to parse shopping list paginated response: {}", e);
-                    anyhow::anyhow!("Invalid paginated response format: {}", e)
+                    anyhow::anyhow!("Invalid paginated response format: {e}")
                 })?
             };
 
@@ -506,7 +606,7 @@ impl TandoorClient {
             .await
             .map_err(|e| {
                 tracing::error!("Network error adding bulk items to shopping list: {}", e);
-                anyhow::anyhow!("Failed to connect to Tandoor API: {}", e)
+                anyhow::anyhow!("Failed to connect to Tandoor API: {e}")
             })?;
 
         let status = response.status();
@@ -522,16 +622,12 @@ impl TandoorClient {
                 status,
                 error_body
             );
-            anyhow::bail!(
-                "Failed to add bulk to shopping list: {} - {}",
-                status,
-                error_body
-            );
+            anyhow::bail!("Failed to add bulk to shopping list: {status} - {error_body}");
         }
 
         let entries: Vec<ShoppingListEntry> = response.json().await.map_err(|e| {
             tracing::error!("Failed to parse bulk add response: {}", e);
-            anyhow::anyhow!("Invalid response format: {}", e)
+            anyhow::anyhow!("Invalid response format: {e}")
         })?;
 
         tracing::info!(
@@ -621,7 +717,7 @@ impl TandoorClient {
             .await
             .map_err(|e| {
                 tracing::error!("Network error getting meal plans: {}", e);
-                anyhow::anyhow!("Failed to connect to Tandoor API: {}", e)
+                anyhow::anyhow!("Failed to connect to Tandoor API: {e}")
             })?;
 
         let status = response.status();
@@ -637,12 +733,12 @@ impl TandoorClient {
                 status,
                 error_body
             );
-            anyhow::bail!("Failed to get meal plans: {} - {}", status, error_body);
+            anyhow::bail!("Failed to get meal plans: {status} - {error_body}");
         }
 
         let meal_plans: PaginatedResponse<MealPlan> = response.json().await.map_err(|e| {
             tracing::error!("Failed to parse meal plans response: {}", e);
-            anyhow::anyhow!("Invalid response format: {}", e)
+            anyhow::anyhow!("Invalid response format: {e}")
         })?;
 
         tracing::debug!("Successfully retrieved {} meal plans", meal_plans.count);
@@ -771,7 +867,7 @@ impl TandoorClient {
             .await
             .map_err(|e| {
                 tracing::error!("Network error getting cook log: {}", e);
-                anyhow::anyhow!("Failed to connect to Tandoor API: {}", e)
+                anyhow::anyhow!("Failed to connect to Tandoor API: {e}")
             })?;
 
         let status = response.status();
@@ -787,12 +883,12 @@ impl TandoorClient {
                 status,
                 error_body
             );
-            anyhow::bail!("Failed to get cook log: {} - {}", status, error_body);
+            anyhow::bail!("Failed to get cook log: {status} - {error_body}");
         }
 
         let cook_log: PaginatedResponse<CookLog> = response.json().await.map_err(|e| {
             tracing::error!("Failed to parse cook log response: {}", e);
-            anyhow::anyhow!("Invalid response format: {}", e)
+            anyhow::anyhow!("Invalid response format: {e}")
         })?;
 
         tracing::debug!("Successfully retrieved {} cook log entries", cook_log.count);
@@ -835,12 +931,12 @@ impl TandoorClient {
             .header("Authorization", auth_header)
             .send()
             .await
-            .map_err(|e| anyhow::anyhow!("Failed to connect to Tandoor API: {}", e))?;
+            .map_err(|e| anyhow::anyhow!("Failed to connect to Tandoor API: {e}"))?;
 
         let status = response.status();
         if !status.is_success() {
             let error_body = response.text().await.unwrap_or_default();
-            anyhow::bail!("Failed to search keywords: {} - {}", status, error_body);
+            anyhow::bail!("Failed to search keywords: {status} - {error_body}");
         }
         let keywords = response.json().await?;
         Ok(keywords)
@@ -860,7 +956,7 @@ impl TandoorClient {
             .await
             .map_err(|e| {
                 tracing::error!("Network error getting keywords: {}", e);
-                anyhow::anyhow!("Failed to connect to Tandoor API: {}", e)
+                anyhow::anyhow!("Failed to connect to Tandoor API: {e}")
             })?;
 
         let status = response.status();
@@ -883,22 +979,16 @@ impl TandoorClient {
                 404 => anyhow::bail!(
                     "Keywords endpoint not found. Check Tandoor version and API availability."
                 ),
-                500..=599 => anyhow::bail!(
-                    "Tandoor server error getting keywords ({}): {}",
-                    status,
-                    error_body
-                ),
-                _ => anyhow::bail!(
-                    "Failed to get keywords with status {}: {}",
-                    status,
-                    error_body
-                ),
+                500..=599 => {
+                    anyhow::bail!("Tandoor server error getting keywords ({status}): {error_body}")
+                }
+                _ => anyhow::bail!("Failed to get keywords with status {status}: {error_body}"),
             }
         }
 
         let keywords: PaginatedResponse<Keyword> = response.json().await.map_err(|e| {
             tracing::error!("Failed to parse keywords response: {}", e);
-            anyhow::anyhow!("Invalid response format from Tandoor server: {}", e)
+            anyhow::anyhow!("Invalid response format from Tandoor server: {e}")
         })?;
 
         tracing::debug!("Successfully retrieved {} keywords", keywords.count);
@@ -919,7 +1009,7 @@ impl TandoorClient {
             .await
             .map_err(|e| {
                 tracing::error!("Network error getting units: {}", e);
-                anyhow::anyhow!("Failed to connect to Tandoor API: {}", e)
+                anyhow::anyhow!("Failed to connect to Tandoor API: {e}")
             })?;
 
         let status = response.status();
@@ -938,18 +1028,16 @@ impl TandoorClient {
                 404 => anyhow::bail!(
                     "Units endpoint not found. Check Tandoor version and API availability."
                 ),
-                500..=599 => anyhow::bail!(
-                    "Tandoor server error getting units ({}): {}",
-                    status,
-                    error_body
-                ),
-                _ => anyhow::bail!("Failed to get units with status {}: {}", status, error_body),
+                500..=599 => {
+                    anyhow::bail!("Tandoor server error getting units ({status}): {error_body}")
+                }
+                _ => anyhow::bail!("Failed to get units with status {status}: {error_body}"),
             }
         }
 
         let units: PaginatedResponse<Unit> = response.json().await.map_err(|e| {
             tracing::error!("Failed to parse units response: {}", e);
-            anyhow::anyhow!("Invalid response format from Tandoor server: {}", e)
+            anyhow::anyhow!("Invalid response format from Tandoor server: {e}")
         })?;
 
         tracing::debug!("Successfully retrieved {} units", units.count);
@@ -968,12 +1056,12 @@ impl TandoorClient {
             .json(&body)
             .send()
             .await
-            .map_err(|e| anyhow::anyhow!("Failed to connect to Tandoor API: {}", e))?;
+            .map_err(|e| anyhow::anyhow!("Failed to connect to Tandoor API: {e}"))?;
 
         let result: RecipeFromSourceResponse = response
             .json()
             .await
-            .map_err(|e| anyhow::anyhow!("Invalid response from recipe import endpoint: {}", e))?;
+            .map_err(|e| anyhow::anyhow!("Invalid response from recipe import endpoint: {e}"))?;
         Ok(result)
     }
 
@@ -990,12 +1078,12 @@ impl TandoorClient {
             .json(&body)
             .send()
             .await
-            .map_err(|e| anyhow::anyhow!("Failed to connect to Tandoor API: {}", e))?;
+            .map_err(|e| anyhow::anyhow!("Failed to connect to Tandoor API: {e}"))?;
 
         let status = response.status();
         if !status.is_success() {
             let error_body = response.text().await.unwrap_or_default();
-            anyhow::bail!("Failed to update step {}: {} - {}", id, status, error_body);
+            anyhow::bail!("Failed to update step {id}: {status} - {error_body}");
         }
 
         let step = response.json().await?;
@@ -1013,17 +1101,12 @@ impl TandoorClient {
             .json(&body)
             .send()
             .await
-            .map_err(|e| anyhow::anyhow!("Failed to connect to Tandoor API: {}", e))?;
+            .map_err(|e| anyhow::anyhow!("Failed to connect to Tandoor API: {e}"))?;
 
         let status = response.status();
         if !status.is_success() {
             let error_body = response.text().await.unwrap_or_default();
-            anyhow::bail!(
-                "Failed to update recipe {}: {} - {}",
-                id,
-                status,
-                error_body
-            );
+            anyhow::bail!("Failed to update recipe {id}: {status} - {error_body}");
         }
 
         let recipe = response.json().await?;
@@ -1040,7 +1123,7 @@ impl TandoorClient {
             .header("Authorization", auth_header)
             .send()
             .await
-            .map_err(|e| anyhow::anyhow!("Failed to connect to Tandoor API: {}", e))?;
+            .map_err(|e| anyhow::anyhow!("Failed to connect to Tandoor API: {e}"))?;
 
         if !response.status().is_success() {
             anyhow::bail!("Failed to delete recipe {}: {}", id, response.status());
@@ -1064,7 +1147,7 @@ impl TandoorClient {
             .header("Authorization", auth_header)
             .send()
             .await
-            .map_err(|e| anyhow::anyhow!("Failed to connect to Tandoor API: {}", e))?;
+            .map_err(|e| anyhow::anyhow!("Failed to connect to Tandoor API: {e}"))?;
 
         if !response.status().is_success() {
             anyhow::bail!("Failed to get recipe books: {}", response.status());
@@ -1084,12 +1167,12 @@ impl TandoorClient {
             .json(&request)
             .send()
             .await
-            .map_err(|e| anyhow::anyhow!("Failed to connect to Tandoor API: {}", e))?;
+            .map_err(|e| anyhow::anyhow!("Failed to connect to Tandoor API: {e}"))?;
 
         let status = response.status();
         if !status.is_success() {
             let error_body = response.text().await.unwrap_or_default();
-            anyhow::bail!("Failed to create recipe book: {} - {}", status, error_body);
+            anyhow::bail!("Failed to create recipe book: {status} - {error_body}");
         }
         let book = response.json().await?;
         Ok(book)
@@ -1127,7 +1210,7 @@ impl TandoorClient {
             .header("Authorization", auth_header)
             .send()
             .await
-            .map_err(|e| anyhow::anyhow!("Failed to connect to Tandoor API: {}", e))?;
+            .map_err(|e| anyhow::anyhow!("Failed to connect to Tandoor API: {e}"))?;
 
         if !response.status().is_success() {
             anyhow::bail!("Failed to delete recipe book {}: {}", id, response.status());
@@ -1151,7 +1234,7 @@ impl TandoorClient {
             .header("Authorization", auth_header)
             .send()
             .await
-            .map_err(|e| anyhow::anyhow!("Failed to connect to Tandoor API: {}", e))?;
+            .map_err(|e| anyhow::anyhow!("Failed to connect to Tandoor API: {e}"))?;
 
         if !response.status().is_success() {
             anyhow::bail!("Failed to get recipe book entries: {}", response.status());
@@ -1174,12 +1257,12 @@ impl TandoorClient {
             .json(&request)
             .send()
             .await
-            .map_err(|e| anyhow::anyhow!("Failed to connect to Tandoor API: {}", e))?;
+            .map_err(|e| anyhow::anyhow!("Failed to connect to Tandoor API: {e}"))?;
 
         let status = response.status();
         if !status.is_success() {
             let error_body = response.text().await.unwrap_or_default();
-            anyhow::bail!("Failed to add recipe to book: {} - {}", status, error_body);
+            anyhow::bail!("Failed to add recipe to book: {status} - {error_body}");
         }
         let entry = response.json().await?;
         Ok(entry)
@@ -1195,7 +1278,7 @@ impl TandoorClient {
             .header("Authorization", auth_header)
             .send()
             .await
-            .map_err(|e| anyhow::anyhow!("Failed to connect to Tandoor API: {}", e))?;
+            .map_err(|e| anyhow::anyhow!("Failed to connect to Tandoor API: {e}"))?;
 
         if !response.status().is_success() {
             anyhow::bail!(
@@ -1217,7 +1300,7 @@ impl TandoorClient {
             .header("Authorization", auth_header)
             .send()
             .await
-            .map_err(|e| anyhow::anyhow!("Failed to connect to Tandoor API: {}", e))?;
+            .map_err(|e| anyhow::anyhow!("Failed to connect to Tandoor API: {e}"))?;
 
         if !response.status().is_success() {
             anyhow::bail!("Failed to get supermarkets: {}", response.status());
@@ -1242,7 +1325,7 @@ impl TandoorClient {
             .header("Authorization", auth_header)
             .send()
             .await
-            .map_err(|e| anyhow::anyhow!("Failed to connect to Tandoor API: {}", e))?;
+            .map_err(|e| anyhow::anyhow!("Failed to connect to Tandoor API: {e}"))?;
 
         if !response.status().is_success() {
             anyhow::bail!("Failed to get unit conversions: {}", response.status());

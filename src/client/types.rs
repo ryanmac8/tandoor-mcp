@@ -270,7 +270,8 @@ pub struct Step {
 #[derive(Debug, Serialize, Deserialize)]
 pub struct StepIngredient {
     pub id: i32,
-    pub food: Food,
+    /// None for section headers (is_header), which carry their text in `note`
+    pub food: Option<Food>,
     pub unit: Option<Unit>,
     pub amount: f64,
     pub note: Option<String>,
@@ -463,7 +464,8 @@ pub struct CreateStepRequest {
 
 #[derive(Debug, Serialize, Deserialize)]
 pub struct CreateStepIngredientRequest {
-    pub food: CreateFoodRequest,
+    /// None for section headers
+    pub food: Option<CreateFoodRequest>,
     pub unit: Option<CreateUnitRequest>,
     pub amount: String,
     pub note: Option<String>,
@@ -586,4 +588,11 @@ pub struct CreateRecipeBookRequest {
 pub struct CreateRecipeBookEntryRequest {
     pub book: i32,
     pub recipe: i32,
+}
+
+impl StepIngredient {
+    /// Food name, or "" for section headers that have no food
+    pub fn food_name(&self) -> &str {
+        self.food.as_ref().map(|f| f.name.as_str()).unwrap_or("")
+    }
 }

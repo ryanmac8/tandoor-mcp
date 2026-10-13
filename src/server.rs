@@ -2156,7 +2156,11 @@ impl TandoorMcpServer {
 
     #[tool(
         description = "Create a new recipe. Use `steps` to add structured steps, each with the ingredients used in that step (food, unit, amount, note; omit amount for to-taste ingredients) — recommended. `instructions` is a legacy fallback that creates a single step with no ingredients.",
-        annotations(read_only_hint = false, destructive_hint = false, open_world_hint = false)
+        annotations(
+            read_only_hint = false,
+            destructive_hint = false,
+            open_world_hint = false
+        )
     )]
     async fn create_recipe(
         &self,
@@ -2250,7 +2254,11 @@ impl TandoorMcpServer {
 
     #[tool(
         description = "Import a recipe from a URL. Tandoor will scrape and parse the page. Returns the imported recipe or an error message if the site is not supported.",
-        annotations(read_only_hint = false, destructive_hint = false, open_world_hint = true)
+        annotations(
+            read_only_hint = false,
+            destructive_hint = false,
+            open_world_hint = true
+        )
     )]
     async fn import_recipe_from_url(
         &self,
@@ -2296,7 +2304,11 @@ impl TandoorMcpServer {
     // Shopping list tools
     #[tool(
         description = "Add items to the shopping list in plain words, e.g. items: [\"3 lemons\", \"2 lb chicken thighs\", \"milk\", \"1/2 cup parsley\", \"a dozen eggs\"]. Amount and unit are read from the text; foods are matched by name (plurals included) and created if new. If the same food and unit is already on the list it increases that line instead of adding a duplicate (merge_with_existing, default true). For a recipe's ingredients use add_recipe_to_shopping_list.",
-        annotations(read_only_hint = false, destructive_hint = false, open_world_hint = false)
+        annotations(
+            read_only_hint = false,
+            destructive_hint = false,
+            open_world_hint = false
+        )
     )]
     async fn add_to_shopping_list(
         &self,
@@ -2883,7 +2895,11 @@ impl TandoorMcpServer {
 
     #[tool(
         description = "Create a new meal plan",
-        annotations(read_only_hint = false, destructive_hint = false, open_world_hint = false)
+        annotations(
+            read_only_hint = false,
+            destructive_hint = false,
+            open_world_hint = false
+        )
     )]
     async fn create_meal_plan(
         &self,
@@ -2957,7 +2973,12 @@ impl TandoorMcpServer {
 
     #[tool(
         description = "Update fields on an existing meal plan (recipe, title, servings, date, meal_type, note) without deleting and recreating it",
-        annotations(read_only_hint = false, destructive_hint = true, idempotent_hint = true, open_world_hint = false)
+        annotations(
+            read_only_hint = false,
+            destructive_hint = true,
+            idempotent_hint = true,
+            open_world_hint = false
+        )
     )]
     async fn update_meal_plan(
         &self,
@@ -3027,7 +3048,11 @@ impl TandoorMcpServer {
 
     #[tool(
         description = "Delete a meal plan",
-        annotations(read_only_hint = false, destructive_hint = true, open_world_hint = false)
+        annotations(
+            read_only_hint = false,
+            destructive_hint = true,
+            open_world_hint = false
+        )
     )]
     async fn delete_meal_plan(
         &self,
@@ -3139,7 +3164,12 @@ impl TandoorMcpServer {
     // Shopping list management tools
     #[tool(
         description = "Check off (mark purchased) shopping list items by food name, e.g. items: [\"lemons\", \"milk\"], or by entry ID. Every line for that food is checked. Pass checked: false to uncheck (put back on the list).",
-        annotations(read_only_hint = false, destructive_hint = true, idempotent_hint = true, open_world_hint = false)
+        annotations(
+            read_only_hint = false,
+            destructive_hint = true,
+            idempotent_hint = true,
+            open_world_hint = false
+        )
     )]
     async fn check_shopping_items(
         &self,
@@ -3214,7 +3244,12 @@ impl TandoorMcpServer {
 
     #[tool(
         description = "Change one shopping list item by food name (e.g. \"lemons\") or entry ID: amount, unit (\"\" removes it), food (swap for another, e.g. \"Meyer lemons\"), checked status, or which named shopping lists it's on. Other items are untouched.",
-        annotations(read_only_hint = false, destructive_hint = true, idempotent_hint = true, open_world_hint = false)
+        annotations(
+            read_only_hint = false,
+            destructive_hint = true,
+            idempotent_hint = true,
+            open_world_hint = false
+        )
     )]
     async fn update_shopping_list_item(
         &self,
@@ -3329,7 +3364,11 @@ impl TandoorMcpServer {
 
     #[tool(
         description = "Remove items from the shopping list by food name (e.g. \"lemons\") or entry ID, without checking them off or touching other items. Every line for that food is removed.",
-        annotations(read_only_hint = false, destructive_hint = true, open_world_hint = false)
+        annotations(
+            read_only_hint = false,
+            destructive_hint = true,
+            open_world_hint = false
+        )
     )]
     async fn remove_from_shopping_list(
         &self,
@@ -3386,7 +3425,11 @@ impl TandoorMcpServer {
 
     #[tool(
         description = "Clear checked items from shopping list and update pantry",
-        annotations(read_only_hint = false, destructive_hint = true, open_world_hint = false)
+        annotations(
+            read_only_hint = false,
+            destructive_hint = true,
+            open_world_hint = false
+        )
     )]
     async fn clear_shopping_list(&self) -> Result<CallToolResult, McpError> {
         // Ensure we're authenticated before making API calls
@@ -3475,7 +3518,12 @@ impl TandoorMcpServer {
     // Inventory management tools
     #[tool(
         description = "Update pantry inventory status (on hand / not on hand). Tandoor tracks only whether a food is on hand, not how much. Foods are matched by exact name or plural (case-insensitive); foods that don't exist yet are created when marked available, unless create_missing is false.",
-        annotations(read_only_hint = false, destructive_hint = true, idempotent_hint = true, open_world_hint = false)
+        annotations(
+            read_only_hint = false,
+            destructive_hint = true,
+            idempotent_hint = true,
+            open_world_hint = false
+        )
     )]
     async fn update_pantry(
         &self,
@@ -3661,7 +3709,11 @@ impl TandoorMcpServer {
 
     #[tool(
         description = "Log a cooked recipe",
-        annotations(read_only_hint = false, destructive_hint = false, open_world_hint = false)
+        annotations(
+            read_only_hint = false,
+            destructive_hint = false,
+            open_world_hint = false
+        )
     )]
     async fn log_cooked_recipe(
         &self,
@@ -3898,7 +3950,12 @@ impl TandoorMcpServer {
 
     #[tool(
         description = "Update an existing recipe. Top-level fields (name, description, servings, cooking_time, waiting_time, source_url, source_title) change only what you pass. Keywords/tags: `add_keywords` / `remove_keywords` (by name) change just those; `replace_all_keywords` is a FULL REPLACEMENT of the keyword list. To edit steps, call get_recipe_details first and refer to steps by their step_number: `step_updates` edits specific steps and their ingredients (add_ingredients, remove_ingredients, update_ingredients to change an amount/unit/note/food in place, or replace_ingredients), `add_steps` inserts new steps, `move_steps` reorders, `remove_steps` deletes; all other steps stay untouched. An ingredient entry of {\"header\": \"For the sauce\"} is a section heading. `replace_all_steps` is a FULL REPLACEMENT that deletes every existing step and ingredient — only use it to rewrite the whole recipe. Returns the recipe's resulting steps so you can verify.",
-        annotations(read_only_hint = false, destructive_hint = true, idempotent_hint = true, open_world_hint = false)
+        annotations(
+            read_only_hint = false,
+            destructive_hint = true,
+            idempotent_hint = true,
+            open_world_hint = false
+        )
     )]
     async fn update_recipe(
         &self,
@@ -4070,7 +4127,12 @@ impl TandoorMcpServer {
 
     #[tool(
         description = "Set a recipe's photo from an image URL. The URL must point directly at a JPEG, PNG, WebP, or GIF file (not a web page). The server downloads it and uploads it to Tandoor, replacing any existing photo.",
-        annotations(read_only_hint = false, destructive_hint = true, idempotent_hint = true, open_world_hint = false)
+        annotations(
+            read_only_hint = false,
+            destructive_hint = true,
+            idempotent_hint = true,
+            open_world_hint = false
+        )
     )]
     async fn set_recipe_image(
         &self,
@@ -4108,7 +4170,12 @@ impl TandoorMcpServer {
 
     #[tool(
         description = "Remove a recipe's photo",
-        annotations(read_only_hint = false, destructive_hint = true, idempotent_hint = true, open_world_hint = false)
+        annotations(
+            read_only_hint = false,
+            destructive_hint = true,
+            idempotent_hint = true,
+            open_world_hint = false
+        )
     )]
     async fn remove_recipe_image(
         &self,
@@ -4130,7 +4197,11 @@ impl TandoorMcpServer {
 
     #[tool(
         description = "Delete a recipe permanently",
-        annotations(read_only_hint = false, destructive_hint = true, open_world_hint = false)
+        annotations(
+            read_only_hint = false,
+            destructive_hint = true,
+            open_world_hint = false
+        )
     )]
     async fn delete_recipe(
         &self,
@@ -4198,7 +4269,11 @@ impl TandoorMcpServer {
 
     #[tool(
         description = "Create a new recipe book/collection",
-        annotations(read_only_hint = false, destructive_hint = false, open_world_hint = false)
+        annotations(
+            read_only_hint = false,
+            destructive_hint = false,
+            open_world_hint = false
+        )
     )]
     async fn create_recipe_book(
         &self,
@@ -4235,7 +4310,12 @@ impl TandoorMcpServer {
 
     #[tool(
         description = "Rename or update the description of a recipe book/collection",
-        annotations(read_only_hint = false, destructive_hint = true, idempotent_hint = true, open_world_hint = false)
+        annotations(
+            read_only_hint = false,
+            destructive_hint = true,
+            idempotent_hint = true,
+            open_world_hint = false
+        )
     )]
     async fn update_recipe_book(
         &self,
@@ -4277,7 +4357,11 @@ impl TandoorMcpServer {
 
     #[tool(
         description = "Delete a recipe book/collection by ID",
-        annotations(read_only_hint = false, destructive_hint = true, open_world_hint = false)
+        annotations(
+            read_only_hint = false,
+            destructive_hint = true,
+            open_world_hint = false
+        )
     )]
     async fn delete_recipe_book(
         &self,
@@ -4305,7 +4389,11 @@ impl TandoorMcpServer {
 
     #[tool(
         description = "Add a recipe to a recipe book. Returns the entry ID needed to remove it later.",
-        annotations(read_only_hint = false, destructive_hint = false, open_world_hint = false)
+        annotations(
+            read_only_hint = false,
+            destructive_hint = false,
+            open_world_hint = false
+        )
     )]
     async fn add_to_recipe_book(
         &self,
@@ -4360,7 +4448,11 @@ impl TandoorMcpServer {
 
     #[tool(
         description = "Remove a recipe from a recipe book by entry ID. Use get_recipe_book_entries to find the entry ID.",
-        annotations(read_only_hint = false, destructive_hint = true, open_world_hint = false)
+        annotations(
+            read_only_hint = false,
+            destructive_hint = true,
+            open_world_hint = false
+        )
     )]
     async fn remove_from_recipe_book(
         &self,
@@ -4446,7 +4538,11 @@ impl TandoorMcpServer {
 
     #[tool(
         description = "Add a recipe's ingredients to the shopping list, scaled to `servings`, skipping foods already on hand in the pantry (listed in skipped_on_hand) unless include_on_hand is true. Entries are linked to the recipe in Tandoor.",
-        annotations(read_only_hint = false, destructive_hint = false, open_world_hint = false)
+        annotations(
+            read_only_hint = false,
+            destructive_hint = false,
+            open_world_hint = false
+        )
     )]
     async fn add_recipe_to_shopping_list(
         &self,
@@ -4593,7 +4689,11 @@ impl TandoorMcpServer {
 
     #[tool(
         description = "Merge one food into another: every recipe ingredient, shopping list entry, etc. using the source food is moved to the target, then the source food is DELETED. Permanent — confirm with the user first. Use find_duplicate_foods or search_foods to get the IDs.",
-        annotations(read_only_hint = false, destructive_hint = true, open_world_hint = false)
+        annotations(
+            read_only_hint = false,
+            destructive_hint = true,
+            open_world_hint = false
+        )
     )]
     async fn merge_foods(
         &self,
@@ -4640,7 +4740,11 @@ impl TandoorMcpServer {
 
     #[tool(
         description = "Add all recipe ingredients from meal plans in a date range to the shopping list. Foods already on hand are skipped (listed in skipped_on_hand) unless skip_on_hand is false.",
-        annotations(read_only_hint = false, destructive_hint = false, open_world_hint = false)
+        annotations(
+            read_only_hint = false,
+            destructive_hint = false,
+            open_world_hint = false
+        )
     )]
     async fn add_meal_plan_to_shopping_list(
         &self,
@@ -4780,7 +4884,11 @@ impl TandoorMcpServer {
 
     #[tool(
         description = "Create a supermarket/store, optionally with its aisle (category) order",
-        annotations(read_only_hint = false, destructive_hint = false, open_world_hint = false)
+        annotations(
+            read_only_hint = false,
+            destructive_hint = false,
+            open_world_hint = false
+        )
     )]
     async fn create_supermarket(
         &self,
@@ -4828,7 +4936,12 @@ impl TandoorMcpServer {
 
     #[tool(
         description = "Rename or describe a supermarket, and/or set its aisle order. `category_order` is the FULL walking order of category names; categories not listed are removed from this store (not deleted).",
-        annotations(read_only_hint = false, destructive_hint = true, idempotent_hint = true, open_world_hint = false)
+        annotations(
+            read_only_hint = false,
+            destructive_hint = true,
+            idempotent_hint = true,
+            open_world_hint = false
+        )
     )]
     async fn update_supermarket(
         &self,
@@ -4879,7 +4992,11 @@ impl TandoorMcpServer {
 
     #[tool(
         description = "Delete a supermarket/store and its aisle order. Permanent — confirm with the user first. Categories and foods are kept.",
-        annotations(read_only_hint = false, destructive_hint = true, open_world_hint = false)
+        annotations(
+            read_only_hint = false,
+            destructive_hint = true,
+            open_world_hint = false
+        )
     )]
     async fn delete_supermarket(
         &self,
@@ -4923,7 +5040,11 @@ impl TandoorMcpServer {
 
     #[tool(
         description = "Create a supermarket category (aisle/section), e.g. \"Bulk Bins\"",
-        annotations(read_only_hint = false, destructive_hint = false, open_world_hint = false)
+        annotations(
+            read_only_hint = false,
+            destructive_hint = false,
+            open_world_hint = false
+        )
     )]
     async fn create_supermarket_category(
         &self,
@@ -4966,7 +5087,12 @@ impl TandoorMcpServer {
 
     #[tool(
         description = "Rename or describe a supermarket category (aisle/section)",
-        annotations(read_only_hint = false, destructive_hint = true, idempotent_hint = true, open_world_hint = false)
+        annotations(
+            read_only_hint = false,
+            destructive_hint = true,
+            idempotent_hint = true,
+            open_world_hint = false
+        )
     )]
     async fn update_supermarket_category(
         &self,
@@ -5006,7 +5132,11 @@ impl TandoorMcpServer {
 
     #[tool(
         description = "Delete a supermarket category (aisle/section). Permanent — confirm with the user first. Foods in it become uncategorized and it is removed from every store's aisle order.",
-        annotations(read_only_hint = false, destructive_hint = true, open_world_hint = false)
+        annotations(
+            read_only_hint = false,
+            destructive_hint = true,
+            open_world_hint = false
+        )
     )]
     async fn delete_supermarket_category(
         &self,
@@ -5032,7 +5162,12 @@ impl TandoorMcpServer {
 
     #[tool(
         description = "Put foods in a supermarket category (aisle), e.g. foods: [\"lemons\", \"parsley\"], category: \"Produce\", so they group together on the shopping list. The category is created if new; omit it to clear.",
-        annotations(read_only_hint = false, destructive_hint = true, idempotent_hint = true, open_world_hint = false)
+        annotations(
+            read_only_hint = false,
+            destructive_hint = true,
+            idempotent_hint = true,
+            open_world_hint = false
+        )
     )]
     async fn set_food_category(
         &self,
@@ -5112,7 +5247,11 @@ impl TandoorMcpServer {
 
     #[tool(
         description = "Create a named shopping list, e.g. \"Costco\" or \"Party\"",
-        annotations(read_only_hint = false, destructive_hint = false, open_world_hint = false)
+        annotations(
+            read_only_hint = false,
+            destructive_hint = false,
+            open_world_hint = false
+        )
     )]
     async fn create_shopping_list(
         &self,
@@ -5149,7 +5288,12 @@ impl TandoorMcpServer {
 
     #[tool(
         description = "Rename a named shopping list or change its description/color",
-        annotations(read_only_hint = false, destructive_hint = true, idempotent_hint = true, open_world_hint = false)
+        annotations(
+            read_only_hint = false,
+            destructive_hint = true,
+            idempotent_hint = true,
+            open_world_hint = false
+        )
     )]
     async fn update_shopping_list(
         &self,
@@ -5192,7 +5336,11 @@ impl TandoorMcpServer {
 
     #[tool(
         description = "Delete a named shopping list. Permanent — confirm with the user first. Items on it stay on the main shopping list, just no longer tagged with this list.",
-        annotations(read_only_hint = false, destructive_hint = true, open_world_hint = false)
+        annotations(
+            read_only_hint = false,
+            destructive_hint = true,
+            open_world_hint = false
+        )
     )]
     async fn delete_shopping_list(
         &self,
@@ -5242,7 +5390,12 @@ impl TandoorMcpServer {
 
     #[tool(
         description = "Change the servings of a recipe on the shopping list; its items are rescaled (e.g. 2 → 6 servings triples them). Other items are untouched.",
-        annotations(read_only_hint = false, destructive_hint = true, idempotent_hint = true, open_world_hint = false)
+        annotations(
+            read_only_hint = false,
+            destructive_hint = true,
+            idempotent_hint = true,
+            open_world_hint = false
+        )
     )]
     async fn update_shopping_list_recipe(
         &self,
@@ -5280,7 +5433,11 @@ impl TandoorMcpServer {
 
     #[tool(
         description = "Remove a recipe from the shopping list together with all the items it added. Items you added yourself are kept. Confirm with the user first.",
-        annotations(read_only_hint = false, destructive_hint = true, open_world_hint = false)
+        annotations(
+            read_only_hint = false,
+            destructive_hint = true,
+            open_world_hint = false
+        )
     )]
     async fn remove_recipe_from_shopping_list(
         &self,

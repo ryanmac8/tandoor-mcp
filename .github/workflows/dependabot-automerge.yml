@@ -8,66 +8,74 @@ permissions:
   contents: write
   pull-requests: write
   checks: read
+  actions: write
 
 jobs:
   auto-merge:
-    if: github.actor == 'dependabot[bot]'
+    # PR author, not github.actor: a close/reopen or re-run by a human must
+    # still be treated as a Dependabot PR.
+    if: github.event.pull_request.user.login == 'dependabot[bot]'
     runs-on: ubuntu-latest
-    
+
     steps:
-      - name: Checkout code
-        uses: actions/checkout@v4
-      
       - name: Get Dependabot metadata
         id: metadata
-        uses: dependabot/fetch-metadata@v1
+        uses: dependabot/fetch-metadata@v3
         with:
           github-token: "${{ secrets.GITHUB_TOKEN }}"
-      
-      - name: Wait for CI checks
-        uses: lewagon/wait-on-check-action@v1.3.1
+
+      # Check names must match the job `name:` fields in ci.yml.
+      - name: Wait for Unit Tests
+        uses: lewagon/wait-on-check-action@v1.9.1
         with:
           ref: ${{ github.event.pull_request.head.sha }}
-          check-name: 'Test Suite'
+          check-name: 'Unit Tests'
           repo-token: ${{ secrets.GITHUB_TOKEN }}
           wait-interval: 30
           allowed-conclusions: success
-      
-      - name: Wait for Docker build check
-        uses: lewagon/wait-on-check-action@v1.3.1
+
+      - name: Wait for Docker Build
+        uses: lewagon/wait-on-check-action@v1.9.1
         with:
           ref: ${{ github.event.pull_request.head.sha }}
-          check-name: 'Docker Build Test'
+          check-name: 'Docker Build'
           repo-token: ${{ secrets.GITHUB_TOKEN }}
           wait-interval: 30
           allowed-conclusions: success
-      
-      - name: Wait for Security Audit check
-        uses: lewagon/wait-on-check-action@v1.3.1
+
+      - name: Wait for Security Audit
+        uses: lewagon/wait-on-check-action@v1.9.1
         with:
           ref: ${{ github.event.pull_request.head.sha }}
           check-name: 'Security Audit'
           repo-token: ${{ secrets.GITHUB_TOKEN }}
           wait-interval: 30
           allowed-conclusions: success
-      
-      - name: Auto-merge for GitHub Actions updates
+
+      # The checks above already passed, so merge directly. (--auto needs branch
+      # protection, and GITHUB_TOKEN may not approve PRs by default.)
+      - name: Merge GitHub Actions updates
         if: steps.metadata.outputs.package-ecosystem == 'github_actions'
-        run: |
-          gh pr review --approve "$PR_URL"
-          gh pr merge --auto --squash "$PR_URL"
+        run: gh pr merge --squash "$PR_URL"
         env:
           PR_URL: ${{ github.event.pull_request.html_url }}
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-      
-      - name: Auto-merge for minor/patch Cargo updates
+
+      - name: Merge minor/patch Cargo and Docker updates
+        id: merge_deps
         if: |
-          steps.metadata.outputs.package-ecosystem == 'cargo' &&
-          (steps.metadata.outputs.update-type == 'version-update:semver-patch' || 
+          (steps.metadata.outputs.package-ecosystem == 'cargo' || steps.metadata.outputs.package-ecosystem == 'docker') &&
+          (steps.metadata.outputs.update-type == 'version-update:semver-patch' ||
            steps.metadata.outputs.update-type == 'version-update:semver-minor')
-        run: |
-          gh pr review --approve "$PR_URL"
-          gh pr merge --auto --squash "$PR_URL"
+        run: gh pr merge --squash "$PR_URL"
         env:
           PR_URL: ${{ github.event.pull_request.html_url }}
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      # Pushes made with GITHUB_TOKEN don't trigger other workflows, so the
+      # publish workflow is started explicitly to ship the updated image.
+      - name: Publish image for merged dependency update
+        if: steps.merge_deps.outcome == 'success'
+        run: gh workflow run publish.yml --repo "$GITHUB_REPOSITORY" --ref main
+        env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

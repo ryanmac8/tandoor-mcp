@@ -1,22 +1,16 @@
 version: 2
 updates:
-  # Update GitHub Actions
   - package-ecosystem: "github-actions"
     directory: "/"
     schedule:
       interval: "weekly"
     open-pull-requests-limit: 10
-    reviewers:
-      - "@me"
 
-  # Update Cargo dependencies
   - package-ecosystem: "cargo"
     directory: "/"
     schedule:
       interval: "weekly"
     open-pull-requests-limit: 10
-    reviewers:
-      - "@me"
     groups:
       tokio:
         patterns:
@@ -27,3 +21,13 @@ updates:
       tracing:
         patterns:
           - "tracing*"
+
+  # Builder and runtime must stay on the same Debian release (see the
+  # bookworm pin in the Dockerfile); only bump the Rust version.
+  - package-ecosystem: "docker"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+    open-pull-requests-limit: 5
+    ignore:
+      - dependency-name: "gcr.io/distroless/cc-debian12"

@@ -1154,6 +1154,14 @@ pub struct SearchFoodsParams {
 }
 
 #[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
+pub struct UpdateFoodPluralParams {
+    /// ID of an existing food, obtained from search_foods
+    pub food_id: i64,
+    /// Plural name, e.g. "tomatoes"; "" clears it
+    pub plural_name: String,
+}
+
+#[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
 pub struct UpdatePantryItem {
     /// Food name. Matched against existing foods by exact name or plural (case-insensitive).
     pub food: String,
@@ -2674,6 +2682,42 @@ impl TandoorMcpServer {
                     error.to_string(),
                 )]))
             }
+        }
+    }
+
+    #[tool(
+        description = "Set or clear the plural name of an existing food by ID from search_foods. Use an empty plural_name to clear it. Does not create foods or change pantry status.",
+        annotations(
+            read_only_hint = false,
+            destructive_hint = true,
+            idempotent_hint = true,
+            open_world_hint = false
+        )
+    )]
+    async fn update_food_plural(
+        &self,
+        Parameters(params): Parameters<UpdateFoodPluralParams>,
+    ) -> Result<CallToolResult, McpError> {
+        if params.food_id <= 0 {
+            return tool_err("Invalid food ID", "food_id must be positive");
+        }
+        let client = auth_or_return!(self);
+        let plural = params.plural_name.trim();
+        let plural = if plural.is_empty() {
+            None
+        } else {
+            Some(plural)
+        };
+        match client
+            .api_update("food", params.food_id, json!({"plural_name": plural}))
+            .await
+        {
+            Ok(food) => tool_ok(json!({
+                "id": food["id"],
+                "name": food["name"],
+                "plural_name": food["plural_name"]
+            })),
+            Err(e) => tool_err("Failed to update food plural", e),
         }
     }
 
@@ -5550,7 +5594,7 @@ impl ServerHandler for TandoorMcpServer {
                 get_shopping_lists, get_shopping_list_recipes, get_supermarket_categories. \
                 WRITE tools (modify data — confirm intent before calling): create_recipe, \
                 import_recipe_from_url, update_recipe, add_to_shopping_list, \
-                check_shopping_items, update_shopping_list_item, \
+                check_shopping_items, update_shopping_list_item, update_food_plural, \
                 update_pantry, create_meal_plan, update_meal_plan, log_cooked_recipe, \
                 create_recipe_book, update_recipe_book, add_to_recipe_book, \
                 add_meal_plan_to_shopping_list, add_recipe_to_shopping_list, \
@@ -5580,6 +5624,87 @@ impl ServerHandler for TandoorMcpServer {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn update_food_plural_patches_only_the_plural_and_reports_errors() {
+        use axum::{extract::Path, http::StatusCode, routing::patch, Json, Router};
+
+        async fn update_food(
+            Path(id): Path<i64>,
+            Json(body): Json<serde_json::Value>,
+        ) -> (StatusCode, Json<serde_json::Value>) {
+            match id {
+                1 => {
+                    assert_eq!(body, json!({"plural_name": "tomatoes"}));
+                    (
+                        StatusCode::OK,
+                        Json(
+                            json!({"id": 1, "name": "Tomato", "plural_name": "tomatoes", "food_onhand": true}),
+                        ),
+                    )
+                }
+                2 => {
+                    assert_eq!(body, json!({"plural_name": null}));
+                    (
+                        StatusCode::OK,
+                        Json(
+                            json!({"id": 2, "name": "Egg", "plural_name": null, "food_onhand": false}),
+                        ),
+                    )
+                }
+                _ => (StatusCode::NOT_FOUND, Json(json!({"detail": "Not found"}))),
+            }
+        }
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let mock = tokio::spawn(async move {
+            axum::serve(
+                listener,
+                Router::new().route("/api/food/{id}/", patch(update_food)),
+            )
+            .await
+            .unwrap();
+        });
+        let server = TandoorMcpServer::new(format!("http://{address}"));
+        server
+            .client
+            .lock()
+            .await
+            .set_token("test-token".to_string());
+
+        for (food_id, plural_name, expected) in [
+            (1, " tomatoes ", json!("tomatoes")),
+            (2, "", serde_json::Value::Null),
+        ] {
+            let result = server
+                .update_food_plural(Parameters(UpdateFoodPluralParams {
+                    food_id,
+                    plural_name: plural_name.to_string(),
+                }))
+                .await
+                .unwrap();
+            let result = serde_json::to_value(result).unwrap();
+            assert_ne!(result["isError"], true);
+            let body: serde_json::Value =
+                serde_json::from_str(result["content"][0]["text"].as_str().unwrap()).unwrap();
+            assert_eq!(body["id"], food_id);
+            assert_eq!(body["plural_name"], expected);
+        }
+
+        for food_id in [0, 3] {
+            let result = server
+                .update_food_plural(Parameters(UpdateFoodPluralParams {
+                    food_id,
+                    plural_name: "eggs".to_string(),
+                }))
+                .await
+                .unwrap();
+            let result = serde_json::to_value(result).unwrap();
+            assert_eq!(result["isError"], true);
+        }
+        mock.abort();
+    }
 
     #[tokio::test]
     async fn search_foods_paginates_and_reports_more_results() {
@@ -6246,7 +6371,7 @@ mod annotation_tests {
     #[test]
     fn every_tool_declares_annotations() {
         let tools = TandoorMcpServer::tool_router().list_all();
-        assert_eq!(tools.len(), 54, "unexpected tool count");
+        assert_eq!(tools.len(), 55, "unexpected tool count");
 
         for tool in &tools {
             let name = tool.name.as_ref();

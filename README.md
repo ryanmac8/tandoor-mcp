@@ -242,6 +242,7 @@ Items are referred to by food name (e.g. `"lemons"`, plurals match) or entry ID;
 ### Food & Inventory
 
 - `search_foods` — Search for foods/ingredients with fuzzy name matching. `limit` requests a page size (Tandoor may cap it at 200); use 1-based `page` and `has_next` to retrieve more results, keeping `query` and `limit` unchanged between pages.
+- `update_food_plural` — Set a food's plural name by ID from `search_foods`; use an empty string to clear it. Other food fields and pantry status are unchanged.
 - `update_pantry` — Mark foods on hand / not on hand (Tandoor tracks on-hand status, not quantities). Matches existing foods by exact name or plural (case-insensitive) and creates foods that don't exist yet when marked available (optional `supermarket_category`; disable with `create_missing: false`)
 - `find_duplicate_foods` — List foods that look like duplicates (same name apart from case, spacing, or a simple plural)
 - `merge_foods` — Merge one food into another by ID; recipes and shopping entries move to the target and the source food is **deleted**

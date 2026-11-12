@@ -310,6 +310,16 @@ impl TandoorClient {
         query: &str,
         limit: Option<i32>,
     ) -> Result<PaginatedResponse<Food>> {
+        self.search_foods_page(query, limit, None).await
+    }
+
+    pub async fn search_foods_page(
+        &self,
+        query: &str,
+        limit: Option<i32>,
+        page: Option<u32>,
+    ) -> Result<PaginatedResponse<Food>> {
+        anyhow::ensure!(page != Some(0), "Page must be at least 1");
         let auth_header = self.get_auth_header()?;
         let mut url = format!(
             "{}/api/food/?query={}",
@@ -319,6 +329,9 @@ impl TandoorClient {
 
         if let Some(l) = limit {
             url.push_str(&format!("&page_size={l}"));
+        }
+        if let Some(page) = page {
+            url.push_str(&format!("&page={page}"));
         }
 
         tracing::debug!(

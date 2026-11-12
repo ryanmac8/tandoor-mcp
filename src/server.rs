@@ -1143,9 +1143,14 @@ pub struct RemoveFromShoppingListParams {
 
 #[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
 pub struct SearchFoodsParams {
+    /// Search text; use an empty string to list foods
     pub query: String,
+    /// Requested number of foods per page; Tandoor may cap this at 200
     #[serde(default)]
     pub limit: Option<i32>,
+    /// 1-based page number (default 1); keep query and limit unchanged between pages
+    #[serde(default)]
+    pub page: Option<u32>,
 }
 
 #[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
@@ -2598,7 +2603,7 @@ impl TandoorMcpServer {
     }
 
     #[tool(
-        description = "Search for foods/ingredients with fuzzy name matching",
+        description = "Search foods/ingredients with fuzzy name matching. Results are paginated; use page and has_next to retrieve further pages.",
         annotations(read_only_hint = true, open_world_hint = false)
     )]
     async fn search_foods(
@@ -2622,7 +2627,10 @@ impl TandoorMcpServer {
             }
         };
 
-        match client.search_foods(&params.query, params.limit).await {
+        match client
+            .search_foods_page(&params.query, params.limit, params.page)
+            .await
+        {
             Ok(response) => {
                 let foods_json: Vec<serde_json::Value> = response
                     .results
@@ -2642,7 +2650,10 @@ impl TandoorMcpServer {
                 let result = json!({
                     "foods": foods_json,
                     "total_count": response.count,
-                    "query": params.query
+                    "query": params.query,
+                    "page": params.page.unwrap_or(1),
+                    "has_next": response.next.is_some(),
+                    "has_previous": response.previous.is_some()
                 });
 
                 Ok(CallToolResult::success(vec![Content::text(
@@ -5569,6 +5580,82 @@ impl ServerHandler for TandoorMcpServer {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn search_foods_paginates_and_reports_more_results() {
+        use axum::{extract::Query, routing::get, Json, Router};
+        use std::collections::HashMap;
+
+        async fn foods(Query(params): Query<HashMap<String, String>>) -> Json<serde_json::Value> {
+            assert_eq!(params.get("query").map(String::as_str), Some("a & b"));
+            assert_eq!(params.get("page_size").map(String::as_str), Some("1000"));
+            let page = params.get("page").map(String::as_str).unwrap_or("1");
+            let (id, next, previous) = match page {
+                "1" => (1, Some("next"), None),
+                "2" => (2, None, Some("previous")),
+                _ => panic!("unexpected page"),
+            };
+            Json(json!({
+                "count": 2, "next": next, "previous": previous,
+                "results": [{
+                    "id": id, "name": format!("food {id}"), "plural_name": null,
+                    "description": null, "recipe": null, "food_onhand": false,
+                    "supermarket_category": null, "inherit_fields": [], "properties": []
+                }]
+            }))
+        }
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let mock = tokio::spawn(async move {
+            axum::serve(listener, Router::new().route("/api/food/", get(foods)))
+                .await
+                .unwrap();
+        });
+        let server = TandoorMcpServer::new(format!("http://{address}"));
+        server
+            .client
+            .lock()
+            .await
+            .set_token("test-token".to_string());
+
+        for (page, id, has_next, has_previous) in
+            [(None, 1, true, false), (Some(2), 2, false, true)]
+        {
+            let result = server
+                .search_foods(Parameters(SearchFoodsParams {
+                    query: "a & b".to_string(),
+                    limit: Some(1000),
+                    page,
+                }))
+                .await
+                .unwrap();
+            let result = serde_json::to_value(result).unwrap();
+            let body: serde_json::Value =
+                serde_json::from_str(result["content"][0]["text"].as_str().unwrap()).unwrap();
+            assert_eq!(body["foods"][0]["id"], id);
+            assert_eq!(body["total_count"], 2);
+            assert_eq!(body["page"], page.unwrap_or(1));
+            assert_eq!(body["has_next"], has_next);
+            assert_eq!(body["has_previous"], has_previous);
+        }
+
+        let result = server
+            .search_foods(Parameters(SearchFoodsParams {
+                query: String::new(),
+                limit: None,
+                page: Some(0),
+            }))
+            .await
+            .unwrap();
+        let result = serde_json::to_value(result).unwrap();
+        assert_eq!(result["isError"], true);
+        assert!(result["content"][0]["text"]
+            .as_str()
+            .unwrap()
+            .contains("Page must be at least 1"));
+        mock.abort();
+    }
 
     #[test]
     fn build_step_requests_orders_steps_from_one_and_ingredients_from_zero() {

@@ -1143,9 +1143,22 @@ pub struct RemoveFromShoppingListParams {
 
 #[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
 pub struct SearchFoodsParams {
+    /// Search text; use an empty string to list foods
     pub query: String,
+    /// Requested number of foods per page; Tandoor may cap this at 200
     #[serde(default)]
     pub limit: Option<i32>,
+    /// 1-based page number (default 1); keep query and limit unchanged between pages
+    #[serde(default)]
+    pub page: Option<u32>,
+}
+
+#[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
+pub struct UpdateFoodPluralParams {
+    /// ID of an existing food, obtained from search_foods
+    pub food_id: i64,
+    /// Plural name, e.g. "tomatoes"; "" clears it
+    pub plural_name: String,
 }
 
 #[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
@@ -2598,7 +2611,7 @@ impl TandoorMcpServer {
     }
 
     #[tool(
-        description = "Search for foods/ingredients with fuzzy name matching",
+        description = "Search foods/ingredients with fuzzy name matching. Results are paginated; use page and has_next to retrieve further pages.",
         annotations(read_only_hint = true, open_world_hint = false)
     )]
     async fn search_foods(
@@ -2622,7 +2635,10 @@ impl TandoorMcpServer {
             }
         };
 
-        match client.search_foods(&params.query, params.limit).await {
+        match client
+            .search_foods_page(&params.query, params.limit, params.page)
+            .await
+        {
             Ok(response) => {
                 let foods_json: Vec<serde_json::Value> = response
                     .results
@@ -2642,7 +2658,10 @@ impl TandoorMcpServer {
                 let result = json!({
                     "foods": foods_json,
                     "total_count": response.count,
-                    "query": params.query
+                    "query": params.query,
+                    "page": params.page.unwrap_or(1),
+                    "has_next": response.next.is_some(),
+                    "has_previous": response.previous.is_some()
                 });
 
                 Ok(CallToolResult::success(vec![Content::text(
@@ -2663,6 +2682,42 @@ impl TandoorMcpServer {
                     error.to_string(),
                 )]))
             }
+        }
+    }
+
+    #[tool(
+        description = "Set or clear the plural name of an existing food by ID from search_foods. Use an empty plural_name to clear it. Does not create foods or change pantry status.",
+        annotations(
+            read_only_hint = false,
+            destructive_hint = true,
+            idempotent_hint = true,
+            open_world_hint = false
+        )
+    )]
+    async fn update_food_plural(
+        &self,
+        Parameters(params): Parameters<UpdateFoodPluralParams>,
+    ) -> Result<CallToolResult, McpError> {
+        if params.food_id <= 0 {
+            return tool_err("Invalid food ID", "food_id must be positive");
+        }
+        let client = auth_or_return!(self);
+        let plural = params.plural_name.trim();
+        let plural = if plural.is_empty() {
+            None
+        } else {
+            Some(plural)
+        };
+        match client
+            .api_update("food", params.food_id, json!({"plural_name": plural}))
+            .await
+        {
+            Ok(food) => tool_ok(json!({
+                "id": food["id"],
+                "name": food["name"],
+                "plural_name": food["plural_name"]
+            })),
+            Err(e) => tool_err("Failed to update food plural", e),
         }
     }
 
@@ -5539,7 +5594,7 @@ impl ServerHandler for TandoorMcpServer {
                 get_shopping_lists, get_shopping_list_recipes, get_supermarket_categories. \
                 WRITE tools (modify data — confirm intent before calling): create_recipe, \
                 import_recipe_from_url, update_recipe, add_to_shopping_list, \
-                check_shopping_items, update_shopping_list_item, \
+                check_shopping_items, update_shopping_list_item, update_food_plural, \
                 update_pantry, create_meal_plan, update_meal_plan, log_cooked_recipe, \
                 create_recipe_book, update_recipe_book, add_to_recipe_book, \
                 add_meal_plan_to_shopping_list, add_recipe_to_shopping_list, \
@@ -5569,6 +5624,163 @@ impl ServerHandler for TandoorMcpServer {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn update_food_plural_patches_only_the_plural_and_reports_errors() {
+        use axum::{extract::Path, http::StatusCode, routing::patch, Json, Router};
+
+        async fn update_food(
+            Path(id): Path<i64>,
+            Json(body): Json<serde_json::Value>,
+        ) -> (StatusCode, Json<serde_json::Value>) {
+            match id {
+                1 => {
+                    assert_eq!(body, json!({"plural_name": "tomatoes"}));
+                    (
+                        StatusCode::OK,
+                        Json(
+                            json!({"id": 1, "name": "Tomato", "plural_name": "tomatoes", "food_onhand": true}),
+                        ),
+                    )
+                }
+                2 => {
+                    assert_eq!(body, json!({"plural_name": null}));
+                    (
+                        StatusCode::OK,
+                        Json(
+                            json!({"id": 2, "name": "Egg", "plural_name": null, "food_onhand": false}),
+                        ),
+                    )
+                }
+                _ => (StatusCode::NOT_FOUND, Json(json!({"detail": "Not found"}))),
+            }
+        }
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let mock = tokio::spawn(async move {
+            axum::serve(
+                listener,
+                Router::new().route("/api/food/{id}/", patch(update_food)),
+            )
+            .await
+            .unwrap();
+        });
+        let server = TandoorMcpServer::new(format!("http://{address}"));
+        server
+            .client
+            .lock()
+            .await
+            .set_token("test-token".to_string());
+
+        for (food_id, plural_name, expected) in [
+            (1, " tomatoes ", json!("tomatoes")),
+            (2, "", serde_json::Value::Null),
+        ] {
+            let result = server
+                .update_food_plural(Parameters(UpdateFoodPluralParams {
+                    food_id,
+                    plural_name: plural_name.to_string(),
+                }))
+                .await
+                .unwrap();
+            let result = serde_json::to_value(result).unwrap();
+            assert_ne!(result["isError"], true);
+            let body: serde_json::Value =
+                serde_json::from_str(result["content"][0]["text"].as_str().unwrap()).unwrap();
+            assert_eq!(body["id"], food_id);
+            assert_eq!(body["plural_name"], expected);
+        }
+
+        for food_id in [0, 3] {
+            let result = server
+                .update_food_plural(Parameters(UpdateFoodPluralParams {
+                    food_id,
+                    plural_name: "eggs".to_string(),
+                }))
+                .await
+                .unwrap();
+            let result = serde_json::to_value(result).unwrap();
+            assert_eq!(result["isError"], true);
+        }
+        mock.abort();
+    }
+
+    #[tokio::test]
+    async fn search_foods_paginates_and_reports_more_results() {
+        use axum::{extract::Query, routing::get, Json, Router};
+        use std::collections::HashMap;
+
+        async fn foods(Query(params): Query<HashMap<String, String>>) -> Json<serde_json::Value> {
+            assert_eq!(params.get("query").map(String::as_str), Some("a & b"));
+            assert_eq!(params.get("page_size").map(String::as_str), Some("1000"));
+            let page = params.get("page").map(String::as_str).unwrap_or("1");
+            let (id, next, previous) = match page {
+                "1" => (1, Some("next"), None),
+                "2" => (2, None, Some("previous")),
+                _ => panic!("unexpected page"),
+            };
+            Json(json!({
+                "count": 2, "next": next, "previous": previous,
+                "results": [{
+                    "id": id, "name": format!("food {id}"), "plural_name": null,
+                    "description": null, "recipe": null, "food_onhand": false,
+                    "supermarket_category": null, "inherit_fields": [], "properties": []
+                }]
+            }))
+        }
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let mock = tokio::spawn(async move {
+            axum::serve(listener, Router::new().route("/api/food/", get(foods)))
+                .await
+                .unwrap();
+        });
+        let server = TandoorMcpServer::new(format!("http://{address}"));
+        server
+            .client
+            .lock()
+            .await
+            .set_token("test-token".to_string());
+
+        for (page, id, has_next, has_previous) in
+            [(None, 1, true, false), (Some(2), 2, false, true)]
+        {
+            let result = server
+                .search_foods(Parameters(SearchFoodsParams {
+                    query: "a & b".to_string(),
+                    limit: Some(1000),
+                    page,
+                }))
+                .await
+                .unwrap();
+            let result = serde_json::to_value(result).unwrap();
+            let body: serde_json::Value =
+                serde_json::from_str(result["content"][0]["text"].as_str().unwrap()).unwrap();
+            assert_eq!(body["foods"][0]["id"], id);
+            assert_eq!(body["total_count"], 2);
+            assert_eq!(body["page"], page.unwrap_or(1));
+            assert_eq!(body["has_next"], has_next);
+            assert_eq!(body["has_previous"], has_previous);
+        }
+
+        let result = server
+            .search_foods(Parameters(SearchFoodsParams {
+                query: String::new(),
+                limit: None,
+                page: Some(0),
+            }))
+            .await
+            .unwrap();
+        let result = serde_json::to_value(result).unwrap();
+        assert_eq!(result["isError"], true);
+        assert!(result["content"][0]["text"]
+            .as_str()
+            .unwrap()
+            .contains("Page must be at least 1"));
+        mock.abort();
+    }
 
     #[test]
     fn build_step_requests_orders_steps_from_one_and_ingredients_from_zero() {
@@ -6159,7 +6371,7 @@ mod annotation_tests {
     #[test]
     fn every_tool_declares_annotations() {
         let tools = TandoorMcpServer::tool_router().list_all();
-        assert_eq!(tools.len(), 54, "unexpected tool count");
+        assert_eq!(tools.len(), 55, "unexpected tool count");
 
         for tool in &tools {
             let name = tool.name.as_ref();

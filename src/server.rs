@@ -1679,6 +1679,21 @@ pub struct MergeFoodsParams {
     pub target_id: i32,
 }
 
+#[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
+pub struct UpdateFoodParams {
+    /// Food ID (from search_foods)
+    pub id: i32,
+    /// New name
+    #[serde(default)]
+    pub name: Option<String>,
+    /// New plural name; "" clears it
+    #[serde(default)]
+    pub plural_name: Option<String>,
+    /// New description; "" clears it
+    #[serde(default)]
+    pub description: Option<String>,
+}
+
 /// Groups foods whose names differ only by case, spacing, or a simple "s"/"es" plural
 /// (e.g. "Tomato" / "tomatoes"), including matches via plural_name.
 pub fn find_duplicate_food_groups(
@@ -5161,6 +5176,56 @@ impl TandoorMcpServer {
     }
 
     #[tool(
+        description = "Rename a food, or change its plural name or description. Only the fields you pass change. Tandoor shows the plural name when the amount is more than 1.",
+        annotations(
+            read_only_hint = false,
+            destructive_hint = true,
+            idempotent_hint = true,
+            open_world_hint = false
+        )
+    )]
+    async fn update_food(
+        &self,
+        Parameters(params): Parameters<UpdateFoodParams>,
+    ) -> Result<CallToolResult, McpError> {
+        let client = auth_or_return!(self);
+        let mut body = serde_json::Map::new();
+        if let Some(name) = params.name.as_deref().map(str::trim) {
+            if name.is_empty() {
+                return tool_err("Failed to update food", "name can't be empty");
+            }
+            body.insert("name".into(), json!(name));
+        }
+        if let Some(plural) = params.plural_name.as_deref().map(str::trim) {
+            body.insert(
+                "plural_name".into(),
+                json!((!plural.is_empty()).then_some(plural)),
+            );
+        }
+        if let Some(description) = params.description {
+            body.insert("description".into(), json!(description.trim()));
+        }
+        if body.is_empty() {
+            return tool_err(
+                "Failed to update food",
+                "pass at least one of name, plural_name, description",
+            );
+        }
+        match client
+            .api_update("food", params.id as i64, body.into())
+            .await
+        {
+            Ok(food) => tool_ok(json!({
+                "id": food["id"],
+                "name": food["name"],
+                "plural_name": food["plural_name"],
+                "description": food["description"]
+            })),
+            Err(e) => tool_err("Failed to update food", e),
+        }
+    }
+
+    #[tool(
         description = "Put foods in a supermarket category (aisle), e.g. foods: [\"lemons\", \"parsley\"], category: \"Produce\", so they group together on the shopping list. The category is created if new; omit it to clear.",
         annotations(
             read_only_hint = false,
@@ -5545,7 +5610,7 @@ impl ServerHandler for TandoorMcpServer {
                 add_meal_plan_to_shopping_list, add_recipe_to_shopping_list, \
                 create_shopping_list, update_shopping_list, update_shopping_list_recipe, \
                 create_supermarket, update_supermarket, create_supermarket_category, \
-                update_supermarket_category, set_food_category, set_recipe_image, \
+                update_supermarket_category, set_food_category, update_food, set_recipe_image, \
                 remove_recipe_image. \
                 DESTRUCTIVE tools (permanent delete — always confirm with user first): \
                 delete_recipe, delete_meal_plan, delete_recipe_book, remove_from_recipe_book, \
@@ -6159,7 +6224,7 @@ mod annotation_tests {
     #[test]
     fn every_tool_declares_annotations() {
         let tools = TandoorMcpServer::tool_router().list_all();
-        assert_eq!(tools.len(), 54, "unexpected tool count");
+        assert_eq!(tools.len(), 55, "unexpected tool count");
 
         for tool in &tools {
             let name = tool.name.as_ref();
